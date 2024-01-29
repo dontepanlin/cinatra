@@ -1,21 +1,21 @@
+cmake_minimum_required(VERSION 3.15)
+project(cinatra_test)
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
-set(project_name test_cinatra)
-add_executable(${project_name}
+add_executable(${PROJECT_NAME}
 		test_coro_http_server.cpp
         test_cinatra.cpp
         test_cinatra_websocket.cpp
         test_cmdline.cpp
         main.cpp
         )
-target_compile_definitions(${project_name} PRIVATE ASYNC_SIMPLE_HAS_NOT_AIO INJECT_FOR_HTTP_CLIENT_TEST)
-target_include_directories(${project_name} PRIVATE
-        ${cinatra_SOURCE_DIR}/include
-)
+target_compile_definitions(${PROJECT_NAME} PRIVATE ASYNC_SIMPLE_HAS_NOT_AIO INJECT_FOR_HTTP_CLIENT_TEST)
+target_link_libraries(${PROJECT_NAME} PRIVATE cinatra)
 
-add_test(NAME ${project_name} COMMAND test_cinatra)
+add_test(NAME ${PROJECT_NAME} COMMAND test_cinatra)
 
 if (ENABLE_GZIP)
-	target_link_libraries(${project_name} ${ZLIB_LIBRARIES})
+	target_link_libraries(${PROJECT_NAME} ${ZLIB_LIBRARIES})
 endif()
 
 # test_coro_file
@@ -37,8 +37,6 @@ if (UNIX)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -pthread")
 endif()
 
-## manual import
-include_directories(${cinatra_SOURCE_DIR}/include)
 
 add_executable(test_corofile
         test_corofile.cpp

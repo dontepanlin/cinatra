@@ -1,8 +1,8 @@
 # extra
-option(BUILD_EXAMPLES "Build examples" ON)
+option(BUILD_EXAMPLES "Build examples" OFF)
 
 # bench test
-option(BUILD_BENCHMARK "Build benchmark" ON)
+option(BUILD_BENCHMARK "Build benchmark" OFF)
 
 # unit test
 option(BUILD_UNIT_TESTS "Build unit tests" ON)
@@ -11,7 +11,7 @@ if(BUILD_UNIT_TESTS)
 endif()
 
 # press tool
-option(BUILD_PRESS_TOOL "Build press tool" ON)
+option(BUILD_PRESS_TOOL "Build press tool" OFF)
 
 # coverage test
 option(COVERAGE_TEST "Build with unit test coverage" OFF)
