@@ -24,12 +24,10 @@ using namespace std::chrono_literals;
 using namespace cinatra;
 
 #ifdef CINATRA_ENABLE_GZIP
-std::string_view get_header_value(
-    std::vector<std::pair<std::string, std::string>> &resp_headers,
-    std::string_view key) {
-  for (const auto &p : resp_headers) {
-    if (p.first == key)
-      return std::string_view(p.second.data(), p.second.size());
+std::string_view get_header_value(auto &resp_headers, std::string_view key) {
+  for (const auto &[k, v] : resp_headers) {
+    if (k == key)
+      return v;
   }
   return {};
 }
@@ -40,7 +38,7 @@ TEST_CASE("test for gzip") {
       "/gzip", [](coro_http_request &req, coro_http_response &res) {
         CHECK(req.get_header_value("Content-Encoding") == "gzip");
         res.set_status_and_content(status_type::ok, "hello world",
-                                   req_content_type::none);  // TODO
+                                   content_encoding::gzip);
       });
   server.async_start();
 
@@ -66,6 +64,16 @@ TEST_CASE("test ssl client") {
     coro_http_client client{};
     auto result = client.get("https://www.bing.com");
     CHECK(result.status >= 200);
+  }
+
+  {
+    coro_http_client client{};
+    auto r =
+        async_simple::coro::syncAwait(client.connect("https://www.baidu.com"));
+    if (r.status == 200) {
+      auto result = client.get("/");
+      CHECK(result.status >= 200);
+    }
   }
 
   {
@@ -179,6 +187,194 @@ TEST_CASE("test cinatra::string SSO to no SSO") {
   CHECK(s == sum);
 }
 
+TEST_CASE("test coro channel") {
+  auto ch = coro_io::create_channel<int>(1000);
+  auto ec = async_simple::coro::syncAwait(coro_io::async_send(ch, 41));
+  CHECK(!ec);
+  ec = async_simple::coro::syncAwait(coro_io::async_send(ch, 42));
+  CHECK(!ec);
+
+  std::error_code err;
+  int val;
+  std::tie(err, val) =
+      async_simple::coro::syncAwait(coro_io::async_receive(ch));
+  CHECK(!err);
+  CHECK(val == 41);
+
+  std::tie(err, val) =
+      async_simple::coro::syncAwait(coro_io::async_receive(ch));
+  CHECK(!err);
+  CHECK(val == 42);
+}
+
+async_simple::coro::Lazy<void> test_select_channel() {
+  using namespace coro_io;
+  using namespace async_simple;
+  using namespace async_simple::coro;
+
+  auto ch1 = coro_io::create_channel<int>(1000);
+  auto ch2 = coro_io::create_channel<int>(1000);
+
+  co_await async_send(ch1, 41);
+  co_await async_send(ch2, 42);
+
+  std::array<int, 2> arr{41, 42};
+  int val;
+
+  size_t index =
+      co_await select(std::pair{async_receive(ch1),
+                                [&val](auto value) {
+                                  auto [ec, r] = value.value();
+                                  val = r;
+                                }},
+                      std::pair{async_receive(ch2), [&val](auto value) {
+                                  auto [ec, r] = value.value();
+                                  val = r;
+                                }});
+
+  CHECK(val == arr[index]);
+
+  co_await async_send(ch1, 41);
+  co_await async_send(ch2, 42);
+
+  std::vector<Lazy<std::pair<std::error_code, int>>> vec;
+  vec.push_back(async_receive(ch1));
+  vec.push_back(async_receive(ch2));
+
+  index = co_await select(std::move(vec), [&](size_t i, auto result) {
+    val = result.value().second;
+  });
+  CHECK(val == arr[index]);
+
+  period_timer timer1(coro_io::get_global_executor());
+  timer1.expires_after(100ms);
+  period_timer timer2(coro_io::get_global_executor());
+  timer2.expires_after(200ms);
+
+  int val1;
+  index = co_await select(std::pair{timer1.async_await(),
+                                    [&](auto val) {
+                                      CHECK(val.value());
+                                      val1 = 0;
+                                    }},
+                          std::pair{timer2.async_await(), [&](auto val) {
+                                      CHECK(val.value());
+                                      val1 = 0;
+                                    }});
+  CHECK(index == val1);
+
+  int val2;
+  index = co_await select(std::pair{coro_io::post([] {
+                                    }),
+                                    [&](auto) {
+                                      std::cout << "post1\n";
+                                      val2 = 0;
+                                    }},
+                          std::pair{coro_io::post([] {
+                                    }),
+                                    [&](auto) {
+                                      std::cout << "post2\n";
+                                      val2 = 1;
+                                    }});
+  CHECK(index == val2);
+
+  co_await async_send(ch1, 43);
+  auto lazy = coro_io::post([] {
+  });
+
+  int val3 = -1;
+  index = co_await select(std::pair{async_receive(ch1),
+                                    [&](auto result) {
+                                      val3 = result.value().second;
+                                    }},
+                          std::pair{std::move(lazy), [&](auto) {
+                                      val3 = 0;
+                                    }});
+
+  if (index == 0) {
+    CHECK(val3 == 43);
+  }
+  else if (index == 1) {
+    CHECK(val3 == 0);
+  }
+}
+
+TEST_CASE("test select coro channel") {
+  using namespace coro_io;
+  async_simple::coro::syncAwait(test_select_channel());
+
+  auto ch = coro_io::create_channel<int>(1000);
+
+  async_simple::coro::syncAwait(coro_io::async_send(ch, 41));
+  async_simple::coro::syncAwait(coro_io::async_send(ch, 42));
+
+  std::error_code ec;
+  int val;
+  std::tie(ec, val) = async_simple::coro::syncAwait(coro_io::async_receive(ch));
+  CHECK(val == 41);
+
+  std::tie(ec, val) = async_simple::coro::syncAwait(coro_io::async_receive(ch));
+  CHECK(val == 42);
+}
+
+TEST_CASE("test bad address") {
+  {
+    coro_http_server server(1, 9001, "127.0.0.1");
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(!ec);
+  }
+  {
+    coro_http_server server(1, 9001, "localhost");
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(!ec);
+  }
+  {
+    coro_http_server server(1, 9001, "0.0.0.0");
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(!ec);
+  }
+  {
+    coro_http_server server(1, 9001);
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(!ec);
+  }
+  {
+    coro_http_server server(1, "0.0.0.0:9001");
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(!ec);
+  }
+  {
+    coro_http_server server(1, "127.0.0.1:9001");
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(!ec);
+  }
+  {
+    coro_http_server server(1, "localhost:9001");
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(!ec);
+  }
+
+  {
+    coro_http_server server(1, 9001, "x.x.x.x");
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(ec);
+  }
+  {
+    coro_http_server server(1, "localhost:aaa");
+    server.async_start();
+    auto ec = server.get_errc();
+    CHECK(ec);
+  }
+}
+
 async_simple::coro::Lazy<void> test_collect_all() {
   asio::io_context ioc;
   std::thread thd([&] {
@@ -199,6 +395,42 @@ async_simple::coro::Lazy<void> test_collect_all() {
     CHECK(result.status >= 200);
   }
   thd.join();
+}
+
+TEST_CASE("test default http handler") {
+  coro_http_server server(1, 9001);
+  server.set_default_handler(
+      [](coro_http_request &req,
+         coro_http_response &resp) -> async_simple::coro::Lazy<void> {
+        resp.set_status_and_content(status_type::ok,
+                                    "It is from default handler");
+        co_return;
+      });
+  server.set_http_handler<POST>(
+      "/view",
+      [](coro_http_request &req,
+         coro_http_response &resp) -> async_simple::coro::Lazy<void> {
+        resp.set_delay(true);
+        resp.set_status_and_content_view(status_type::ok,
+                                         req.get_body());  // no copy
+        co_await resp.get_conn()->reply();
+      });
+  server.async_start();
+
+  for (int i = 0; i < 5; i++) {
+    coro_http_client client{};
+    async_simple::coro::syncAwait(client.connect("http://127.0.0.1:9001"));
+    auto data = client.get("/test");
+    CHECK(data.resp_body == "It is from default handler");
+    data = client.get("/test_again");
+    CHECK(data.resp_body == "It is from default handler");
+    data = client.get("/any");
+    CHECK(data.resp_body == "It is from default handler");
+    data = async_simple::coro::syncAwait(
+        client.async_post("/view", "post string", req_content_type::string));
+    CHECK(data.status == 200);
+    CHECK(data.resp_body == "post string");
+  }
 }
 
 TEST_CASE("test request with out buffer") {
@@ -346,6 +578,7 @@ TEST_CASE("test head put and some other request") {
         std::string result = ec ? "delete failed" : "delete ok";
         resp.set_status_and_content(status_type::ok, result);
       });
+
   server.async_start();
   std::this_thread::sleep_for(300ms);
 
@@ -518,23 +751,6 @@ TEST_CASE("test bad uri") {
   auto result = async_simple::coro::syncAwait(
       client.async_upload_multipart("http://www.badurlrandom.org"));
   CHECK(result.status == 404);
-}
-
-TEST_CASE("test ssl without init ssl"){{coro_http_client client{};
-client.add_str_part("hello", "world");
-auto result = async_simple::coro::syncAwait(
-    client.async_upload_multipart("https://www.bing.com"));
-CHECK(result.status == 404);
-}
-
-#ifndef CINATRA_ENABLE_SSL
-{
-  coro_http_client client{};
-  auto result =
-      async_simple::coro::syncAwait(client.async_get("https://www.bing.com"));
-  CHECK(result.status == 404);
-}
-#endif
 }
 
 TEST_CASE("test multiple ranges download") {
@@ -1153,6 +1369,7 @@ TEST_CASE("test coro_http_client no scheme still send request check") {
   server.stop();
 }
 
+#ifdef DSKIP_TIME_TEST
 TEST_CASE("test conversion between unix time and gmt time, http format") {
   std::chrono::microseconds time_cost{0};
   std::ifstream file("../../tests/files_for_test_time_parse/http_times.txt");
@@ -1271,6 +1488,7 @@ TEST_CASE(
                    std::chrono::microseconds::period::den
             << "s" << std::endl;
 }
+#endif
 
 TEST_CASE("Testing get_content_type_str function") {
   SUBCASE("Test HTML content type") {

@@ -15,6 +15,8 @@
 
 ## [使用cinatra常见问题汇总(FAQ)](https://github.com/qicosmos/cinatra/wiki)
 
+[基于C++20 协程的http库](lang/coroutine_based_http_lib.md)
+
 * [cinatra简介](#cinatra简介)
 * [如何使用](#如何使用)
 * [快速示例](#快速示例)
@@ -217,7 +219,7 @@ int main() {
 	using namespace cinatra;
 
 	//日志切面
-	struct log_t : public base_aspect
+	struct log_t
 	{
 		bool before(coro_http_request& req, coro_http_response& res) {
 			std::cout << "before log" << std::endl;
@@ -231,7 +233,7 @@ int main() {
 	};
 	
 	//校验的切面
-	struct check  : public base_aspect {
+	struct check  {
 		bool before(coro_http_request& req, coro_http_response& res) {
 			std::cout << "before check" << std::endl;
 			if (req.get_header_value("name").empty()) {
@@ -248,9 +250,9 @@ int main() {
 	};
 
 	//将信息从中间件传输到处理程序
-	struct get_data  : public base_aspect {
+	struct get_data  {
 		bool before(coro_http_request& req, coro_http_response& res) {
-			req.set_aspect_data("hello", std::string("hello world"));
+			req.set_aspect_data("hello world");
 			return true;
 		}
 	}
@@ -259,12 +261,12 @@ int main() {
 		coro_http_server server(std::thread::hardware_concurrency(), 8080);
 		server.set_http_handler<GET, POST>("/aspect", [](coro_http_request& req, coro_http_response& res) {
 			res.set_status_and_content(status_type::ok, "hello world");
-		}, std::vector{std::make_shared<check>(), std::make_shared<log_t>()});
+		}, check{}, log_t{});
 
 		server.set_http_handler<GET,POST>("/aspect/data", [](coro_http_request& req, coro_http_response& res) {
-			std::string hello = req.get_aspect_data<std::string>("hello");
-			res.set_status_and_content(status_type::ok, std::move(hello));
-		}, std::vector{std::make_shared<get_data>()});
+			auto& val = req.get_aspect_data();
+			res.set_status_and_content(status_type::ok, std::move(val[0]));
+		}, get_data{});
 
 		server.sync_start();
 		return 0;
@@ -306,6 +308,38 @@ int main() {
 		server.sync_start();
 		return 0;
 	}
+
+## 反向代理
+cinatra 支持反向代理也很简单，3步5行代码就可以了。
+先看一个简单的例子：
+
+```c++
+  reverse_proxy proxy_rr(10, 8091);
+  proxy_rr.add_dest_host("127.0.0.1:9001");
+  proxy_rr.add_dest_host("127.0.0.1:9002");
+  proxy_rr.add_dest_host("127.0.0.1:9003");
+  proxy_rr.start_reverse_proxy<GET, POST>("/rr", true,
+                                          coro_io::load_blance_algorithm::RR);
+```
+第一步创建一个代理服务器，设置其线程数和端口；
+第二步添加需要访问的服务器列表；
+第三步启动代理服务，设置loadbalance 策略，这里选择的是round robin 策略。
+
+在浏览器或者client里访问http://127.0.0.1:8091/rr 就会根据RR 策略选择三个服务器中的一个。
+
+如果要选择random 策略就设置为coro_io::load_blance_algorithm::random。
+
+如果要选择weight round robin 策略，就需要设置服务器权重。
+
+```c++
+  reverse_proxy proxy_wrr(10, 8090);
+  proxy_wrr.add_dest_host("127.0.0.1:9001", 10);
+  proxy_wrr.add_dest_host("127.0.0.1:9002", 5);
+  proxy_wrr.add_dest_host("127.0.0.1:9003", 5);
+  proxy_wrr.start_reverse_proxy<GET, POST>("/wrr", true,
+                                           coro_io::load_blance_algorithm::WRR);
+```
+在浏览器或者client里访问http://127.0.0.1:8090/wrr ，第一次和第二次会返回9001服务器的结果，第三次返回9002服务器的结果，第四次返回9003服务器的结果，第五次又重新返回9001服务器的结果，这就是WRR的策略。
 
 ## cinatra客户端使用
 
@@ -422,29 +456,21 @@ async_simple::coro::Lazy<void> test_download() {
 ```c++
 async_simple::coro::Lazy<void> test_websocket() {
   coro_http_client client{};
-  client.on_ws_close([](std::string_view reason) {
-    std::cout << "web socket close " << reason << std::endl;
-  });
-  client.on_ws_msg([](resp_data data) {
-    if (data.net_err) {
-      std::cout << data.net_err.message() << "\n";
-      return;
-    }
-    std::cout << data.resp_body << std::endl;
-  });
-
-  bool r = co_await client.async_ws_connect("ws://localhost:8090/ws");
-  if (!r) {
+  auto r = co_await client.connect("ws://localhost:8090/ws");
+  if (r.net_err) {
     co_return;
   }
 
-  auto result =
-      co_await client.async_send_ws("hello websocket");  // mask as default.
-  std::cout << result.status << "\n";
-  result = co_await client.async_send_ws("test again", /*need_mask = */ false);
-  std::cout << result.status << "\n";
-  result = co_await client.async_send_ws_close("ws close");
-  std::cout << result.status << "\n";
+  co_await client.write_websocket("hello websocket");
+  auto data = co_await client.read_websocket();
+  CHECK(data.resp_body == "hello websocket");
+  co_await client.write_websocket("test again");
+  data = co_await client.read_websocket();
+  CHECK(data.resp_body == "test again");
+  co_await client.write_websocket("ws close");
+  data = co_await client.read_websocket();
+  CHECK(data.net_err == asio::error::eof);
+  CHECK(data.resp_body == "ws close");
 }
 ```
 

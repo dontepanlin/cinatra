@@ -202,7 +202,7 @@ int main() {
 	using namespace cinatra;
 
 	//日志切面
-	struct log_t : public base_aspect
+	struct log_t
 	{
 		bool before(coro_http_request& req, coro_http_response& res) {
 			std::cout << "before log" << std::endl;
@@ -216,7 +216,7 @@ int main() {
 	};
 	
 	//校验的切面
-	struct check  : public base_aspect {
+	struct check  {
 		bool before(coro_http_request& req, coro_http_response& res) {
 			std::cout << "before check" << std::endl;
 			if (req.get_header_value("name").empty()) {
@@ -233,9 +233,9 @@ int main() {
 	};
 
 	//将信息从中间件传输到处理程序
-	struct get_data  : public base_aspect {
+	struct get_data  {
 		bool before(coro_http_request& req, coro_http_response& res) {
-			req.set_aspect_data("hello", std::string("hello world"));
+			req.set_aspect_data("hello world");
 			return true;
 		}
 	}
@@ -244,12 +244,13 @@ int main() {
 		coro_http_server server(std::thread::hardware_concurrency(), 8080);
 		server.set_http_handler<GET, POST>("/aspect", [](coro_http_request& req, coro_http_response& res) {
 			res.set_status_and_content(status_type::ok, "hello world");
-		}, std::vector{std::make_shared<check>(), std::make_shared<log_t>()});
+		}, check{}, log_t{});
 
 		server.set_http_handler<GET,POST>("/aspect/data", [](coro_http_request& req, coro_http_response& res) {
-			std::string hello = req.get_aspect_data<std::string>("hello");
+      auto &val = req.get_aspect_data();
+			std::string& hello = val[0];
 			res.set_status_and_content(status_type::ok, std::move(hello));
-		}, std::vector{std::make_shared<get_data>()});
+		}, get_data{});
 
 		server.sync_start();
 		return 0;
@@ -413,29 +414,21 @@ async_simple::coro::Lazy<void> test_download() {
 ```c++
 async_simple::coro::Lazy<void> test_websocket() {
   coro_http_client client{};
-  client.on_ws_close([](std::string_view reason) {
-    std::cout << "web socket close " << reason << std::endl;
-  });
-  client.on_ws_msg([](resp_data data) {
-    if (data.net_err) {
-      std::cout << data.net_err.message() << "\n";
-      return;
-    }
-    std::cout << data.resp_body << std::endl;
-  });
-
-  bool r = co_await client.async_ws_connect("ws://localhost:8090/ws");
-  if (!r) {
+  auto r = co_await client.connect("ws://localhost:8090/ws");
+  if (r.net_err) {
     co_return;
   }
 
-  auto result =
-      co_await client.async_send_ws("hello websocket");  // mask as default.
-  std::cout << result.status << "\n";
-  result = co_await client.async_send_ws("test again", /*need_mask = */ false);
-  std::cout << result.status << "\n";
-  result = co_await client.async_send_ws_close("ws close");
-  std::cout << result.status << "\n";
+  co_await client.write_websocket("hello websocket");
+  auto data = co_await client.read_websocket();
+  CHECK(data.resp_body == "hello websocket");
+  co_await client.write_websocket("test again");
+  data = co_await client.read_websocket();
+  CHECK(data.resp_body == "test again");
+  co_await client.write_websocket("ws close");
+  data = co_await client.read_websocket();
+  CHECK(data.net_err == asio::error::eof);
+  CHECK(data.resp_body == "ws close");
 }
 ```
 

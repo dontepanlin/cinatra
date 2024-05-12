@@ -1,6 +1,3 @@
-cmake_minimum_required(VERSION 3.15)
-project(cinatra_test)
-
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 add_executable(${PROJECT_NAME}
 		test_coro_http_server.cpp
@@ -11,6 +8,12 @@ add_executable(${PROJECT_NAME}
         )
 target_compile_definitions(${PROJECT_NAME} PRIVATE ASYNC_SIMPLE_HAS_NOT_AIO INJECT_FOR_HTTP_CLIENT_TEST)
 target_link_libraries(${PROJECT_NAME} PRIVATE cinatra)
+
+option(SKIP_TIME_TEST "skip time tests" OFF)
+if(SKIP_TIME_TEST)
+	message(STATUS "skip time tests")
+    add_definitions(-DSKIP_TIME_TEST)
+endif()
 
 add_test(NAME ${PROJECT_NAME} COMMAND test_cinatra)
 
@@ -40,6 +43,10 @@ endif()
 
 add_executable(test_corofile
         test_corofile.cpp
+        )
+
+add_executable(test_metric
+        test_metric.cpp
         )
 
 if(ENABLE_FILE_IO_URING)

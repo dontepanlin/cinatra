@@ -12,6 +12,10 @@
 #include "async_simple/coro/SyncAwait.h"
 #include "cookie.hpp"
 #include "define.h"
+#ifdef CINATRA_ENABLE_GZIP
+#include "gzip.hpp"
+#endif
+#include "picohttpparser.h"
 #include "response_cv.hpp"
 #include "time_util.hpp"
 #include "utils.hpp"
@@ -46,9 +50,40 @@ class coro_http_response {
     content_ = std::move(content);
     has_set_content_ = true;
   }
-  void set_status_and_content(status_type status, std::string content = "") {
+  void set_status_and_content(
+      status_type status, std::string content = "",
+      content_encoding encoding = content_encoding::none) {
+    set_status_and_content_view(status, std::move(content), encoding, false);
+  }
+
+  template <typename String>
+  void set_status_and_content_view(
+      status_type status, String content = "",
+      content_encoding encoding = content_encoding::none, bool is_view = true) {
     status_ = status;
-    content_ = std::move(content);
+#ifdef CINATRA_ENABLE_GZIP
+    if (encoding == content_encoding::gzip) {
+      std::string encode_str;
+      bool r = gzip_codec::compress(content, encode_str, true);
+      if (!r) {
+        set_status_and_content(status_type::internal_server_error,
+                               "gzip compress error");
+      }
+      else {
+        add_header("Content-Encoding", "gzip");
+        set_content(std::move(encode_str));
+      }
+    }
+    else
+#endif
+    {
+      if (is_view) {
+        content_view_ = content;
+      }
+      else {
+        content_ = std::move(content);
+      }
+    }
     has_set_content_ = true;
   }
   void set_delay(bool r) { delay_ = r; }
@@ -61,9 +96,14 @@ class coro_http_response {
 
   status_type status() { return status_; }
   std::string_view content() { return content_; }
+  size_t content_size() { return content_.size(); }
 
   void add_header(auto k, auto v) {
     resp_headers_.emplace_back(resp_header{std::move(k), std::move(v)});
+  }
+
+  void add_header_span(std::span<http_header> resp_headers) {
+    resp_header_span_ = resp_headers;
   }
 
   void set_keepalive(bool r) { keepalive_ = r; }
@@ -75,16 +115,15 @@ class coro_http_response {
 
   std::string_view get_boundary() { return boundary_; }
 
-  void to_buffers(std::vector<asio::const_buffer> &buffers) {
+  void to_buffers(std::vector<asio::const_buffer> &buffers,
+                  std::string &size_str) {
     buffers.push_back(asio::buffer(to_http_status_string(status_)));
     build_resp_head(buffers);
     if (!content_.empty()) {
-      if (fmt_type_ == format_type::chunked) {
-        to_chunked_buffers(buffers, content_, true);
-      }
-      else {
-        buffers.push_back(asio::buffer(content_));
-      }
+      handle_content(buffers, size_str, content_);
+    }
+    else if (!content_view_.empty()) {
+      handle_content(buffers, size_str, content_view_);
     }
   }
 
@@ -92,13 +131,9 @@ class coro_http_response {
     resp_str.append(to_http_status_string(status_));
     bool has_len = false;
     bool has_host = false;
-    for (auto &[k, v] : resp_headers_) {
-      if (k == "Host") {
-        has_host = true;
-      }
-      if (k == "Content-Length") {
-        has_len = true;
-      }
+    check_header(resp_headers_, has_len, has_host);
+    if (!resp_header_span_.empty()) {
+      check_header(resp_header_span_, has_len, has_host);
     }
 
     if (!has_host) {
@@ -138,31 +173,50 @@ class coro_http_response {
                 : resp_str.append(CONN_CLOSE_SV);
     }
 
-    if (!content_type_.empty()) {
-      resp_str.append(content_type_);
+    append_header_str(resp_str, resp_headers_);
+
+    if (!resp_header_span_.empty()) {
+      append_header_str(resp_str, resp_header_span_);
     }
 
-    for (auto &[k, v] : resp_headers_) {
+    resp_str.append(CRCF);
+    if (content_view_.empty()) {
+      resp_str.append(content_);
+    }
+    else {
+      resp_str.append(content_view_);
+    }
+  }
+
+  void append_header_str(auto &resp_str, auto &resp_headers) {
+    for (auto &[k, v] : resp_headers) {
       resp_str.append(k);
       resp_str.append(COLON_SV);
       resp_str.append(v);
       resp_str.append(CRCF);
     }
+  }
 
-    resp_str.append(CRCF);
-    resp_str.append(content_);
+  void check_header(auto &resp_headers, bool &has_len, bool &has_host) {
+    for (auto &[k, v] : resp_headers) {
+      if (k == "Server") {
+        has_host = true;
+      }
+      else if (k == "Content-Length") {
+        has_len = true;
+      }
+      else if (k == "Date") {
+        need_date_ = false;
+      }
+    }
   }
 
   void build_resp_head(std::vector<asio::const_buffer> &buffers) {
     bool has_len = false;
     bool has_host = false;
-    for (auto &[k, v] : resp_headers_) {
-      if (k == "Host") {
-        has_host = true;
-      }
-      if (k == "Content-Length") {
-        has_len = true;
-      }
+    check_header(resp_headers_, has_len, has_host);
+    if (!resp_header_span_.empty()) {
+      check_header(resp_header_span_, has_len, has_host);
     }
 
     if (!has_host) {
@@ -186,11 +240,12 @@ class coro_http_response {
       }
 
       if (!content_.empty()) {
-        auto [ptr, ec] = std::to_chars(buf_, buf_ + 32, content_.size());
-        buffers.emplace_back(asio::buffer(CONTENT_LENGTH_SV));
-        buffers.emplace_back(
-            asio::buffer(std::string_view(buf_, std::distance(buf_, ptr))));
-        buffers.emplace_back(asio::buffer(CRCF));
+        if (!has_len)
+          handle_content_len(buffers, content_);
+      }
+      else if (!content_view_.empty()) {
+        if (!has_len)
+          handle_content_len(buffers, content_view_);
       }
       else {
         if (!has_len && boundary_.empty())
@@ -214,14 +269,22 @@ class coro_http_response {
       buffers.emplace_back(asio::buffer(content_type_));
     }
 
-    for (auto &[k, v] : resp_headers_) {
+    append_header(buffers, resp_headers_);
+
+    if (!resp_header_span_.empty()) {
+      append_header(buffers, resp_header_span_);
+    }
+
+    buffers.emplace_back(asio::buffer(CRCF));
+  }
+
+  void append_header(auto &buffers, auto &resp_headers) {
+    for (auto &[k, v] : resp_headers) {
       buffers.emplace_back(asio::buffer(k));
       buffers.emplace_back(asio::buffer(COLON_SV));
       buffers.emplace_back(asio::buffer(v));
       buffers.emplace_back(asio::buffer(CRCF));
     }
-
-    buffers.emplace_back(asio::buffer(CRCF));
   }
 
   coro_http_connection *get_conn() { return conn_; }
@@ -248,7 +311,33 @@ class coro_http_response {
     cookies_[cookie.get_name()] = cookie;
   }
 
+  void redirect(const std::string &url, bool is_forever = false) {
+    add_header("Location", url);
+    is_forever == false
+        ? set_status_and_content(status_type::moved_temporarily)
+        : set_status_and_content(status_type::moved_permanently);
+  }
+
  private:
+  void handle_content(std::vector<asio::const_buffer> &buffers,
+                      std::string &size_str, std::string_view content) {
+    if (fmt_type_ == format_type::chunked) {
+      to_chunked_buffers(buffers, size_str, content, true);
+    }
+    else {
+      buffers.push_back(asio::buffer(content));
+    }
+  }
+
+  void handle_content_len(std::vector<asio::const_buffer> &buffers,
+                          std::string_view content) {
+    auto [ptr, ec] = std::to_chars(buf_, buf_ + 32, content.size());
+    buffers.emplace_back(asio::buffer(CONTENT_LENGTH_SV));
+    buffers.emplace_back(
+        asio::buffer(std::string_view(buf_, std::distance(buf_, ptr))));
+    buffers.emplace_back(asio::buffer(CRCF));
+  }
+
   status_type status_;
   format_type fmt_type_;
   std::string content_;
@@ -256,6 +345,7 @@ class coro_http_response {
   bool delay_;
   char buf_[32];
   std::vector<resp_header> resp_headers_;
+  std::span<http_header> resp_header_span_;
   coro_http_connection *conn_;
   std::string boundary_;
   bool has_set_content_ = false;
@@ -263,5 +353,6 @@ class coro_http_response {
   bool need_date_ = true;
   std::unordered_map<std::string, cookie> cookies_;
   std::string_view content_type_;
+  std::string_view content_view_;
 };
 }  // namespace cinatra
