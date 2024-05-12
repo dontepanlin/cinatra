@@ -1,3 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(cinatra_test)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 add_executable(${PROJECT_NAME}
 		test_coro_http_server.cpp

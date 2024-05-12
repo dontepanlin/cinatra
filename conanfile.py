@@ -18,7 +18,7 @@ class CinatraConan(ConanFile):
     settings = "os", "arch", "compiler", "build_type"
     no_copy_source = True
     exports_sources = "include/*", "tests/*"
-    # generators = "CMakeToolchain", "CMakeDeps"
+    generators = "CMakeToolchain", "CMakeDeps"
 
     @property
     def _minimum_cpp_standard(self):
@@ -29,8 +29,8 @@ class CinatraConan(ConanFile):
             check_min_cppstd(self, self._minimum_cpp_standard)
 
     def requirements(self):
-        self.requires("asio/1.29.0")
-        self.requires("async_simple/1.0.0")
+        self.requires("asio/1.30.2")
+        self.requires("async_simple/1.2")
 
     def package(self):
         copy(self, "LICENSE", dst=osp.join(self.package_folder, "licenses"), src=self.source_folder)

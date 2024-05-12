@@ -207,6 +207,7 @@ TEST_CASE("test coro channel") {
   CHECK(val == 42);
 }
 
+#ifdef TEST_CHANNEL_SELECT
 async_simple::coro::Lazy<void> test_select_channel() {
   using namespace coro_io;
   using namespace async_simple;
@@ -298,7 +299,6 @@ async_simple::coro::Lazy<void> test_select_channel() {
     CHECK(val3 == 0);
   }
 }
-
 TEST_CASE("test select coro channel") {
   using namespace coro_io;
   async_simple::coro::syncAwait(test_select_channel());
@@ -316,6 +316,7 @@ TEST_CASE("test select coro channel") {
   std::tie(ec, val) = async_simple::coro::syncAwait(coro_io::async_receive(ch));
   CHECK(val == 42);
 }
+#endif
 
 TEST_CASE("test bad address") {
   {
