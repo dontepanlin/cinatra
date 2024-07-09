@@ -7,6 +7,11 @@ set(cinatra_press_tool
 	main.cpp
 	)
 
+include_directories(../include)
+if(ENABLE_METRIC_JSON)
+    include_directories(../iguana)
+endif()
+
 add_definitions(-DBENCHMARK_TEST)
 add_executable(${project_name} ${cinatra_press_tool})
 target_compile_definitions(${project_name} PRIVATE ASYNC_SIMPLE_HAS_NOT_AIO)
@@ -21,6 +26,11 @@ endif()
 
 if (ENABLE_GZIP)
 	target_link_libraries(${project_name} ${ZLIB_LIBRARIES})
+endif()
+
+if (ENABLE_BROTLI)
+	include_directories(${BROTLI_INCLUDE_DIRS})
+	target_link_libraries(${project_name} ${BROTLI_LIBRARIES})
 endif()
 
 if (ENABLE_SIMD STREQUAL "AARCH64")
@@ -71,6 +81,11 @@ if (ENABLE_PRESS_TOOL_TESTS)
 
     if (ENABLE_GZIP)
         target_link_libraries(${unittest_press_tool} ${ZLIB_LIBRARIES})
+    endif()
+
+    if (ENABLE_BROTLI)
+        include_directories(${BROTLI_INCLUDE_DIRS})
+        target_link_libraries(${unittest_press_tool} ${BROTLI_LIBRARIES})
     endif()
 
 endif()

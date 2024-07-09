@@ -444,14 +444,14 @@ coro_http_client client{};
   create_file(filename, 1010);
 
   coro_io::coro_file file{};
-  co_await file.async_open(filename, coro_io::flags::read_only);
+  file.open(filename, std::ios::in);
 
   std::string buf;
   detail::resize(buf, 100);
 
   auto fn = [&file, &buf]() -> async_simple::coro::Lazy<read_result> {
     auto [ec, size] = co_await file.async_read(buf.data(), buf.size());
-    co_return read_result{buf, file.eof(), ec};
+    co_return read_result{{buf.data(),buf.size()}, file.eof(), ec};
   };
 
   auto result = co_await client.async_upload_chunked(
@@ -528,7 +528,7 @@ async_simple::coro::Lazy<void> byte_ranges_download() {
         auto boundary = req.get_boundary();
         multipart_reader_t multipart(req.get_conn());
         while (true) {
-          auto part_head = co_await multipart.read_part_head();
+          auto part_head = co_await multipart.read_part_head(boundary);
           if (part_head.ec) {
             co_return;
           }
@@ -550,7 +550,7 @@ async_simple::coro::Lazy<void> byte_ranges_download() {
             }
 
             std::cout << filename << "\n";
-            co_await file->async_open(filename, coro_io::flags::create_write);
+            file->open(filename, std::ios::trunc|std::ios::out);
             if (!file->is_open()) {
               resp.set_status_and_content(status_type::internal_server_error,
                                           "file open failed");
@@ -564,8 +564,7 @@ async_simple::coro::Lazy<void> byte_ranges_download() {
           }
 
           if (!filename.empty()) {
-            auto ec = co_await file->async_write(part_body.data.data(),
-                                                 part_body.data.size());
+            auto ec = co_await file->async_write(part_body.data);
             if (ec) {
               co_return;
             }

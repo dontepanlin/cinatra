@@ -1,6 +1,8 @@
 #include <async_simple/coro/Collect.h>
 
+#include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -10,6 +12,7 @@
 #include <system_error>
 #include <vector>
 
+#include "async_simple/coro/Lazy.h"
 #include "async_simple/coro/SyncAwait.h"
 #include "cinatra.hpp"
 #include "cinatra/coro_http_client.hpp"
@@ -18,7 +21,9 @@
 #include "cinatra/multipart.hpp"
 #include "cinatra/string_resize.hpp"
 #include "cinatra/time_util.hpp"
+#include "cinatra_log_wrapper.hpp"
 #include "doctest/doctest.h"
+#include "ylt/coro_io/coro_file.hpp"
 using namespace std::chrono_literals;
 
 using namespace cinatra;
@@ -50,16 +55,140 @@ TEST_CASE("test for gzip") {
   auto result = async_simple::coro::syncAwait(client.async_get(uri));
   auto content = get_header_value(result.resp_headers, "Content-Encoding");
   CHECK(get_header_value(result.resp_headers, "Content-Encoding") == "gzip");
-  std::string decompress_data;
-  bool ret = gzip_codec::uncompress(result.resp_body, decompress_data);
-  CHECK(ret == true);
-  CHECK(decompress_data == "hello world");
+  CHECK(result.resp_body == "hello world");
+  server.stop();
+}
+
+TEST_CASE("test encoding type") {
+  coro_http_server server(1, 9001);
+
+  server.set_http_handler<GET, POST>("/get", [](coro_http_request &req,
+                                                coro_http_response &resp) {
+    auto encoding_type = req.get_encoding_type();
+
+    if (encoding_type ==
+        content_encoding::gzip) {  // only post request have this field
+      std::string decode_str;
+      bool r = gzip_codec::uncompress(req.get_body(), decode_str);
+      CHECK(decode_str == "Hello World");
+    }
+    resp.set_status_and_content(status_type::ok, "ok", content_encoding::gzip,
+                                req.get_accept_encoding());
+    CHECK(resp.content() != "ok");
+  });
+
+  server.set_http_handler<GET>(
+      "/coro",
+      [](coro_http_request &req,
+         coro_http_response &resp) -> async_simple::coro::Lazy<void> {
+        resp.set_status_and_content(status_type::ok, "ok",
+                                    content_encoding::deflate,
+                                    req.get_accept_encoding());
+        CHECK(resp.content() != "ok");
+        co_return;
+      });
+
+  server.set_http_handler<GET>(
+      "/only_gzip",
+      [](coro_http_request &req,
+         coro_http_response &resp) -> async_simple::coro::Lazy<void> {
+        resp.set_status_and_content(status_type::ok, "ok",
+                                    content_encoding::gzip,
+                                    req.get_accept_encoding());
+        // client4 accept-encoding not allow gzip, response content no
+        // compression
+        CHECK(resp.content() == "ok");
+        co_return;
+      });
+
+  server.async_start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  coro_http_client client1{};
+  client1.add_header("Accept-Encoding", "gzip, deflate");
+  auto result = async_simple::coro::syncAwait(
+      client1.async_get("http://127.0.0.1:9001/get"));
+  CHECK(result.resp_body == "ok");
+
+  coro_http_client client2{};
+  client2.add_header("Accept-Encoding", "gzip, deflate");
+  result = async_simple::coro::syncAwait(
+      client2.async_get("http://127.0.0.1:9001/coro"));
+  CHECK(result.resp_body == "ok");
+
+  coro_http_client client3{};
+  std::unordered_map<std::string, std::string> headers = {
+      {"Content-Encoding", "gzip"},
+  };
+  std::string ziped_str;
+  std::string_view data = "Hello World";
+  gzip_codec::compress(data, ziped_str);
+  result = async_simple::coro::syncAwait(client3.async_post(
+      "http://127.0.0.1:9001/get", ziped_str, req_content_type::none, headers));
+  CHECK(result.resp_body == "ok");
+
+  coro_http_client client4{};
+  client4.add_header("Accept-Encoding", "deflate");
+  result = async_simple::coro::syncAwait(
+      client4.async_get("http://127.0.0.1:9001/only_gzip"));
+  CHECK(result.resp_body == "ok");
+
+  server.stop();
+}
+#endif
+
+#ifdef CINATRA_ENABLE_BROTLI
+TEST_CASE("test brotli type") {
+  coro_http_server server(1, 9001);
+
+  server.set_http_handler<GET, POST>(
+      "/get", [](coro_http_request &req, coro_http_response &resp) {
+        auto encoding_type = req.get_encoding_type();
+
+        if (encoding_type == content_encoding::br) {
+          std::string decode_str;
+          bool r = br_codec::brotli_decompress(req.get_body(), decode_str);
+          CHECK(decode_str == "Hello World");
+        }
+        resp.set_status_and_content(status_type::ok, "ok", content_encoding::br,
+                                    req.get_accept_encoding());
+      });
+
+  server.async_start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  coro_http_client client{};
+  std::unordered_map<std::string, std::string> headers = {
+      {"Content-Encoding", "br"},
+  };
+  std::string ziped_str;
+  std::string_view data = "Hello World";
+  bool r = br_codec::brotli_compress(data, ziped_str);
+
+  auto result = async_simple::coro::syncAwait(client.async_post(
+      "http://127.0.0.1:9001/get", ziped_str, req_content_type::none, headers));
+  CHECK(result.resp_body == "ok");
   server.stop();
 }
 #endif
 
 #ifdef CINATRA_ENABLE_SSL
 TEST_CASE("test ssl client") {
+  {
+    coro_http_client client4{};
+    client4.set_ssl_schema(true);
+    auto result = client4.get("www.baidu.com");
+    assert(result.status == 200);
+
+    auto lazy = []() -> async_simple::coro::Lazy<void> {
+      coro_http_client client5{};
+      client5.set_ssl_schema(true);
+      co_await client5.connect("www.baidu.com");
+      auto result = co_await client5.async_get("/");
+      assert(result.status == 200);
+    };
+    async_simple::coro::syncAwait(lazy());
+  }
   {
     coro_http_client client{};
     auto result = client.get("https://www.bing.com");
@@ -159,6 +288,44 @@ TEST_CASE("test cinatra::string with SSO") {
   CHECK(s == "HelloHi233");
 }
 
+TEST_CASE("test parse query") {
+  {
+    http_parser parser{};
+    parser.parse_query("=");
+    parser.parse_query("&a");
+    parser.parse_query("&b=");
+    parser.parse_query("&c=&d");
+    parser.parse_query("&e=&f=1");
+    parser.parse_query("&g=1&h=1");
+    auto map = parser.queries();
+    CHECK(map["a"].empty());
+    CHECK(map["b"].empty());
+    CHECK(map["c"].empty());
+    CHECK(map["d"].empty());
+    CHECK(map["e"].empty());
+    CHECK(map["f"] == "1");
+    CHECK(map["g"] == "1");
+    CHECK(map["h"] == "1");
+  }
+  {
+    http_parser parser{};
+    parser.parse_query("test");
+    parser.parse_query("test1=");
+    parser.parse_query("test2=&");
+    parser.parse_query("test3&");
+    parser.parse_query("test4&a");
+    parser.parse_query("test5&b=2");
+    parser.parse_query("test6=1&c=2");
+    parser.parse_query("test7=1&d");
+    parser.parse_query("test8=1&e=");
+    parser.parse_query("test9=1&f");
+    parser.parse_query("test10=1&g=10&h&i=3&j");
+    auto map = parser.queries();
+    CHECK(map["test"].empty());
+    CHECK(map.size() == 21);
+  }
+}
+
 TEST_CASE("test cinatra::string without SSO") {
   std::string s(1000, 'A');
   std::string s2(5000, 'B');
@@ -187,7 +354,61 @@ TEST_CASE("test cinatra::string SSO to no SSO") {
   CHECK(s == sum);
 }
 
+async_simple::coro::Lazy<void> send_data(auto &ch, size_t count) {
+  for (int i = 0; i < count; i++) {
+    co_await coro_io::async_send(ch, i);
+  }
+}
+
+async_simple::coro::Lazy<void> recieve_data(auto &ch, auto &vec, size_t count) {
+  while (true) {
+    if (vec.size() == count) {
+      std::cout << std::this_thread::get_id() << "\n";
+      break;
+    }
+
+    auto [ec, i] = co_await coro_io::async_receive(ch);
+    vec.push_back(i);
+  }
+}
+
+TEST_CASE("test coro channel with multi thread") {
+  size_t count = 10000;
+  auto ch = coro_io::create_channel<int>(count);
+  send_data(ch, count).via(ch.get_executor()).start([](auto &&) {
+  });
+
+  std::vector<int> vec;
+  std::vector<std::thread> group;
+  for (int i = 0; i < 10; i++) {
+    group.emplace_back(std::thread([&]() {
+      async_simple::coro::syncAwait(
+          recieve_data(ch, vec, count).via(ch.get_executor()));
+    }));
+  }
+  for (auto &thd : group) {
+    thd.join();
+  }
+
+  for (int i = 0; i < count; i++) {
+    CHECK(vec.at(i) == i);
+  }
+}
+
 TEST_CASE("test coro channel") {
+  {
+    auto ch = coro_io::create_shared_channel<std::string>(100);
+    auto ec = async_simple::coro::syncAwait(
+        coro_io::async_send(*ch, std::string("test")));
+    CHECK(!ec);
+
+    std::string val;
+    std::error_code err;
+    std::tie(err, val) =
+        async_simple::coro::syncAwait(coro_io::async_receive(*ch));
+    CHECK(!err);
+    CHECK(val == "test");
+  }
   auto ch = coro_io::create_channel<int>(1000);
   auto ec = async_simple::coro::syncAwait(coro_io::async_send(ch, 41));
   CHECK(!ec);
@@ -435,9 +656,17 @@ TEST_CASE("test default http handler") {
 }
 
 TEST_CASE("test request with out buffer") {
+  coro_http_server server(1, 8090);
+  server.set_http_handler<GET>(
+      "/test", [](coro_http_request &req, coro_http_response &resp) {
+        resp.set_status_and_content(status_type::ok,
+                                    "it is a test string, more than 10 bytes");
+      });
+  server.async_start();
+
   std::string str;
   str.resize(10);
-  std::string url = "http://cn.bing.com";
+  std::string url = "http://127.0.0.1:8090/test";
 
   {
     coro_http_client client;
@@ -446,12 +675,13 @@ TEST_CASE("test request with out buffer") {
     auto result = async_simple::coro::syncAwait(ret);
     std::cout << result.status << "\n";
     std::cout << result.net_err.message() << "\n";
-    if (result.status == 404)
-      CHECK(result.net_err == std::errc::no_buffer_space);
+    std::cout << result.resp_body << "\n";
+    CHECK(result.status == 200);
+    CHECK(!client.is_body_in_out_buf());
   }
 
   {
-    detail::resize(str, 102400);
+    detail::resize(str, 1024);
     coro_http_client client;
     auto ret = client.async_request(url, http_method::GET, req_context<>{}, {},
                                     std::span<char>{str.data(), str.size()});
@@ -460,6 +690,7 @@ TEST_CASE("test request with out buffer") {
     CHECK(ok);
     std::string_view sv(str.data(), result.resp_body.size());
     CHECK(result.resp_body == sv);
+    CHECK(client.is_body_in_out_buf());
   }
 }
 
@@ -521,15 +752,15 @@ TEST_CASE("test coro_http_client async_http_connect") {
       client1.async_http_connect("http//www.badurl.com"));
   CHECK(r.status != 200);
 
-  r = async_simple::coro::syncAwait(client1.reconnect("http://cn.bing.com"));
+  r = async_simple::coro::syncAwait(client1.connect("http://cn.bing.com"));
   CHECK(client1.get_host() == "cn.bing.com");
   CHECK(client1.get_port() == "http");
   CHECK(r.status >= 200);
 
-  r = async_simple::coro::syncAwait(client1.reconnect("http://www.baidu.com"));
+  r = async_simple::coro::syncAwait(client1.connect("http://www.baidu.com"));
 
   CHECK(r.status >= 200);
-  r = async_simple::coro::syncAwait(client1.reconnect("http://cn.bing.com"));
+  r = async_simple::coro::syncAwait(client1.connect("http://cn.bing.com"));
   CHECK(r.status == 200);
 }
 
@@ -634,7 +865,7 @@ TEST_CASE("test upload file") {
         auto boundary = req.get_boundary();
         multipart_reader_t multipart(req.get_conn());
         while (true) {
-          auto part_head = co_await multipart.read_part_head();
+          auto part_head = co_await multipart.read_part_head(boundary);
           if (part_head.ec) {
             co_return;
           }
@@ -656,7 +887,7 @@ TEST_CASE("test upload file") {
             }
 
             std::cout << filename << "\n";
-            co_await file->async_open(filename, coro_io::flags::create_write);
+            file->open(filename, std::ios::trunc | std::ios::out);
             if (!file->is_open()) {
               resp.set_status_and_content(status_type::internal_server_error,
                                           "file open failed");
@@ -670,8 +901,7 @@ TEST_CASE("test upload file") {
           }
 
           if (!filename.empty()) {
-            auto ec = co_await file->async_write(part_body.data.data(),
-                                                 part_body.data.size());
+            auto [ec, sz] = co_await file->async_write(part_body.data);
             if (ec) {
               co_return;
             }
@@ -844,7 +1074,7 @@ TEST_CASE("test coro_http_client multipart upload") {
         auto boundary = req.get_boundary();
         multipart_reader_t multipart(req.get_conn());
         while (true) {
-          auto part_head = co_await multipart.read_part_head();
+          auto part_head = co_await multipart.read_part_head(boundary);
           if (part_head.ec) {
             co_return;
           }
@@ -866,7 +1096,7 @@ TEST_CASE("test coro_http_client multipart upload") {
             }
 
             std::cout << filename << "\n";
-            co_await file->async_open(filename, coro_io::flags::create_write);
+            file->open(filename, std::ios::trunc | std::ios::out);
             if (!file->is_open()) {
               resp.set_status_and_content(status_type::internal_server_error,
                                           "file open failed");
@@ -880,8 +1110,7 @@ TEST_CASE("test coro_http_client multipart upload") {
           }
 
           if (!filename.empty()) {
-            auto ec = co_await file->async_write(part_body.data.data(),
-                                                 part_body.data.size());
+            auto [ec, sz] = co_await file->async_write(part_body.data);
             if (ec) {
               co_return;
             }
@@ -916,6 +1145,161 @@ TEST_CASE("test coro_http_client multipart upload") {
   CHECK(result.status == 200);
 }
 
+TEST_CASE("test coro_http_client upload") {
+  auto test_upload_by_file_path = [](std::string filename,
+                                     std::size_t r_size = SIZE_MAX,
+                                     bool should_failed = false) {
+    coro_http_client client{};
+    client.add_header("filename", filename);
+    if (r_size != SIZE_MAX)
+      client.add_header("filesize", std::to_string(r_size));
+    std::string uri = "http://127.0.0.1:8090/upload";
+    cinatra::resp_data result;
+    if (r_size != SIZE_MAX) {
+      auto lazy = client.async_upload(uri, http_method::PUT, filename, r_size);
+      result = async_simple::coro::syncAwait(lazy);
+    }
+    else {
+      auto lazy = client.async_upload(uri, http_method::PUT, filename);
+      result = async_simple::coro::syncAwait(lazy);
+    }
+    CHECK(((result.status == 200) ^ should_failed));
+  };
+  auto test_upload_by_stream = [](std::string filename,
+                                  std::size_t r_size = SIZE_MAX,
+                                  bool should_failed = false) {
+    coro_http_client client{};
+    client.add_header("filename", filename);
+    if (r_size != SIZE_MAX)
+      client.add_header("filesize", std::to_string(r_size));
+    std::string uri = "http://127.0.0.1:8090/upload";
+    std::ifstream ifs(filename, std::ios::binary);
+    cinatra::resp_data result;
+    if (r_size != SIZE_MAX) {
+      auto lazy = client.async_upload(uri, http_method::PUT, filename, r_size);
+      result = async_simple::coro::syncAwait(lazy);
+    }
+    else {
+      auto lazy = client.async_upload(uri, http_method::PUT, filename);
+      result = async_simple::coro::syncAwait(lazy);
+    }
+    CHECK(((result.status == 200) ^ should_failed));
+  };
+  auto test_upload_by_coro = [](std::string filename,
+                                std::size_t r_size = SIZE_MAX,
+                                bool should_failed = false) {
+    coro_http_client client{};
+    client.add_header("filename", filename);
+    if (r_size != SIZE_MAX)
+      client.add_header("filesize", std::to_string(r_size));
+    std::string uri = "http://127.0.0.1:8090/upload";
+    coro_io::coro_file file;
+    file.open(filename, std::ios::in);
+    CHECK(file.is_open());
+    std::string buf;
+    buf.resize(1'000'000);
+    auto async_read =
+        [&file, &buf]() -> async_simple::coro::Lazy<cinatra::read_result> {
+      auto [ec, size] = co_await file.async_read(buf.data(), buf.size());
+      co_return read_result{{buf.data(), size}, file.eof(), ec};
+    };
+    cinatra::resp_data result;
+    if (r_size == SIZE_MAX) {
+      auto lazy = client.async_upload(uri, http_method::PUT, async_read);
+      result = async_simple::coro::syncAwait(lazy);
+      CHECK(result.status != 200);
+    }
+    else {
+      auto lazy =
+          client.async_upload(uri, http_method::PUT, async_read, r_size);
+      result = async_simple::coro::syncAwait(lazy);
+      CHECK(((result.status == 200) ^ should_failed));
+    }
+  };
+  coro_http_server server(1, 8090);
+  server.set_http_handler<cinatra::PUT>(
+      "/upload",
+      [](coro_http_request &req,
+         coro_http_response &resp) -> async_simple::coro::Lazy<void> {
+        std::string_view filename = req.get_header_value("filename");
+        uint64_t sz;
+        auto oldpath = fs::current_path().append(filename);
+        std::string newpath = fs::current_path()
+                                  .append("server_" + std::string{filename})
+                                  .string();
+        std::ofstream file(newpath, std::ios::binary);
+        CHECK(file.is_open());
+        file.write(req.get_body().data(), req.get_body().size());
+        file.flush();
+        file.close();
+        std::string filesize = std::string{req.get_header_value("filesize")};
+        if (!filesize.empty()) {
+          sz = stoull(filesize);
+        }
+        else {
+          sz = std::filesystem::file_size(oldpath);
+        }
+        CHECK(!filename.empty());
+        CHECK(sz == std::filesystem::file_size(newpath));
+        resp.set_status_and_content(status_type::ok, std::string(filename));
+        co_return;
+      });
+  server.async_start();
+  std::string filename = "test_upload.txt";
+  // upload without size
+  {
+    auto sizes = {1024 * 1024, 2'000'000, 1024, 100, 0};
+    for (auto size : sizes) {
+      std::error_code ec{};
+      fs::remove(filename, ec);
+      if (ec) {
+        std::cout << ec << "\n";
+      }
+      bool r = create_file(filename, size);
+      CHECK(r);
+      test_upload_by_file_path(filename);
+      test_upload_by_stream(filename);
+      test_upload_by_coro(filename);
+    }
+  }
+  // upload with size
+  {
+    auto sizes = {std::pair{1024 * 1024, 1'000'000},
+                  std::pair{2'000'000, 1'999'999}, std::pair{200, 1},
+                  std::pair{100, 0}, std::pair{0, 0}};
+    for (auto [size, r_size] : sizes) {
+      std::error_code ec{};
+      fs::remove(filename, ec);
+      if (ec) {
+        std::cout << ec << "\n";
+      }
+      bool r = create_file(filename, size);
+      CHECK(r);
+      test_upload_by_file_path(filename, r_size);
+      test_upload_by_stream(filename, r_size);
+      test_upload_by_coro(filename, r_size);
+    }
+  }
+  // upload with too large size
+  {
+    auto sizes = {std::pair{1024 * 1024, 1024 * 1024 + 2},
+                  std::pair{2'000'000, 2'000'001}, std::pair{200, 502},
+                  std::pair{0, 1}};
+    for (auto [size, r_size] : sizes) {
+      std::error_code ec{};
+      fs::remove(filename, ec);
+      if (ec) {
+        std::cout << ec << "\n";
+      }
+      bool r = create_file(filename, size);
+      CHECK(r);
+      test_upload_by_file_path(filename, r_size, true);
+      test_upload_by_stream(filename, r_size, true);
+      test_upload_by_coro(filename, r_size, true);
+    }
+  }
+}
+
 TEST_CASE("test coro_http_client chunked upload and download") {
   {
     coro_http_server server(1, 8090);
@@ -928,8 +1312,12 @@ TEST_CASE("test coro_http_client chunked upload and download") {
           std::string_view filename = req.get_header_value("filename");
 
           CHECK(!filename.empty());
-          std::string fullpath = fs::current_path().append(filename).string();
-          std::ofstream file(fullpath, std::ios::binary);
+
+          auto oldpath = fs::current_path().append(filename);
+          std::string newpath = fs::current_path()
+                                    .append("server_" + std::string{filename})
+                                    .string();
+          std::ofstream file(newpath, std::ios::binary);
           CHECK(file.is_open());
 
           while (true) {
@@ -937,42 +1325,31 @@ TEST_CASE("test coro_http_client chunked upload and download") {
             if (result.ec) {
               co_return;
             }
+
+            file.write(result.data.data(), result.data.size());
+
             if (result.eof) {
               break;
             }
-
-            file.write(result.data.data(), result.data.size());
           }
-
+          file.flush();
           file.close();
-          std::cout << "upload finished, filename: " << filename << "\n";
+          auto sz = std::filesystem::file_size(oldpath);
+          CHECK(sz == std::filesystem::file_size(newpath));
           resp.set_status_and_content(status_type::ok, std::string(filename));
         });
 
     server.async_start();
-
-    {
-      std::string filename = "test_1024.txt";
+    auto sizes = {1024 * 1024, 2'000'000, 1024, 100, 0};
+    for (auto size : sizes) {
+      std::string filename = "test_chunked_upload.txt";
       std::error_code ec{};
       fs::remove(filename, ec);
       if (ec) {
         std::cout << ec << "\n";
       }
-      bool r = create_file(filename);
+      bool r = create_file(filename, 1024 * 1024 * 8);
       CHECK(r);
-
-      coro_http_client client{};
-      client.add_header("filename", filename);
-      std::string uri = "http://127.0.0.1:8090/chunked_upload";
-      auto lazy = client.async_upload_chunked(uri, http_method::PUT, filename);
-      auto result = async_simple::coro::syncAwait(lazy);
-      CHECK(result.status == 200);
-    }
-
-    {
-      std::string filename = "test_100.txt";
-      create_file(filename, 100);
-
       coro_http_client client{};
       client.add_header("filename", filename);
       std::string uri = "http://127.0.0.1:8090/chunked_upload";

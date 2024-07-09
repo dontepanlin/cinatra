@@ -23,6 +23,11 @@ if (ENABLE_GZIP)
 	target_link_libraries(${PROJECT_NAME} ${ZLIB_LIBRARIES})
 endif()
 
+if (ENABLE_BROTLI)
+	include_directories(${BROTLI_INCLUDE_DIRS})
+	target_link_libraries(${project_name} ${BROTLI_LIBRARIES})
+endif()
+
 # test_coro_file
 option(ENABLE_FILE_IO_URING "enable io_uring" OFF)
 if(ENABLE_FILE_IO_URING)
@@ -30,6 +35,12 @@ if(ENABLE_FILE_IO_URING)
     add_definitions(-DENABLE_FILE_IO_URING)
     add_definitions(-DASIO_HAS_FILE)
     add_definitions(-DASIO_HAS_IO_URING)
+endif()
+
+if(WIN32)
+    message(STATUS "windows has file")
+	add_definitions(-DASIO_HAS_FILE)
+	add_definitions(-DASIO_HAS_IOCP)
 endif()
 
 option(USE_PREAD_WRITE "enable pread and pwrite" OFF)
@@ -47,10 +58,6 @@ add_executable(test_corofile
         test_corofile.cpp
         )
 
-add_executable(test_metric
-        test_metric.cpp
-        )
-
 if(ENABLE_FILE_IO_URING)
 if (UNIX)
         target_link_libraries(test_corofile PRIVATE uring)
@@ -66,13 +73,17 @@ add_executable(test_time_util
         )
 add_test(NAME test_time_util COMMAND test_time_util)
 
-option(CINATRA_ENABLE_SSL "Enable ssl support" OFF)
-if (CINATRA_ENABLE_SSL)
+add_executable(test_metric
+        test_metric.cpp
+        )
+
+if (ENABLE_SSL)
     message(STATUS "Use SSL")
     find_package(OpenSSL REQUIRED)
     add_definitions(-DCINATRA_ENABLE_SSL)
     target_link_libraries(test_cinatra  OpenSSL::SSL OpenSSL::Crypto)
-    target_link_libraries(test_corofile  PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_link_libraries(test_corofile  OpenSSL::SSL OpenSSL::Crypto)
+	target_link_libraries(test_metric  OpenSSL::SSL OpenSSL::Crypto)
 endif ()
 
 add_executable(test_http_parse
