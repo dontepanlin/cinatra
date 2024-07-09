@@ -10,7 +10,7 @@ include(cmake/develop.cmake)
 add_library(${PROJECT_NAME} INTERFACE)
 include_directories("include")
 target_include_directories(${PROJECT_NAME} INTERFACE "include")
-target_link_libraries(${PROJECT_NAME} INTERFACE asio::asio async_simple::async_simple_header_only)
+target_link_libraries(${PROJECT_NAME} INTERFACE asio::asio)
 
 if (BUILD_UNIT_TESTS)
     add_subdirectory(${cinatra_SOURCE_DIR}/tests)
