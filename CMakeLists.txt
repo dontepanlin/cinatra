@@ -3,11 +3,9 @@ project(cinatra)
 
 find_package(Threads REQUIRED)
 find_package(asio REQUIRED)
-find_package(async_simple REQUIRED)
 
 include(cmake/build.cmake)
 include(cmake/develop.cmake)
-
 
 add_library(${PROJECT_NAME} INTERFACE)
 include_directories("include")
