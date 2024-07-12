@@ -287,12 +287,7 @@ public:
         template <typename PromiseType>
         AS_INLINE auto await_suspend(std::coroutine_handle<PromiseType>
                                          continuation) noexcept(!reschedule) {
-            static_assert(
-                std::is_base_of<LazyPromiseBase, PromiseType>::value ||
-                    std::is_same_v<detail::DetachedCoroutine::promise_type,
-                                   PromiseType>,
-                "'co_await Lazy' is only allowed to be called by Lazy or "
-                "DetachedCoroutine");
+   
 
             // current coro started, caller becomes my continuation
             this->_handle.promise()._continuation = continuation;
