@@ -1232,8 +1232,8 @@ TEST_CASE("test websocket with different message size") {
 TEST_CASE("test ssl server") {
   cinatra::coro_http_server server(1, 9001);
   std::cout << std::filesystem::current_path() << "\n";
-  server.init_ssl("../../include/cinatra/server.crt",
-                  "../../include/cinatra/server.key", "test");
+  server.init_ssl("ssl_data/server.crt",
+                  "ssl_data/server.key", "test");
   server.set_http_handler<GET, POST>(
       "/ssl", [](coro_http_request &req, coro_http_response &resp) {
         resp.set_status_and_content(status_type::ok, "ssl");

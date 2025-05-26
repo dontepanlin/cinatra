@@ -21,9 +21,9 @@
 #include "cinatra/multipart.hpp"
 #include "cinatra/string_resize.hpp"
 #include "cinatra/time_util.hpp"
-#include "cinatra_log_wrapper.hpp"
+#include "cinatra/cinatra_log_wrapper.hpp"
 #include "doctest/doctest.h"
-#include "ylt/coro_io/coro_file.hpp"
+#include "cinatra/ylt/coro_io/coro_file.hpp"
 using namespace std::chrono_literals;
 
 using namespace cinatra;
@@ -1968,8 +1968,8 @@ TEST_CASE("test coro_http_client multipart upload") {
 #ifdef CINATRA_ENABLE_SSL
 TEST_CASE("test ssl upload") {
   coro_http_server server(1, 8091);
-  server.init_ssl("../../include/cinatra/server.crt",
-                  "../../include/cinatra/server.key", "test");
+  server.init_ssl("ssl_data/server.crt",
+                  "ssl_data/server.key", "test");
   server.set_http_handler<cinatra::PUT>(
       "/upload",
       [](coro_http_request &req,
@@ -2040,8 +2040,8 @@ TEST_CASE("test ssl upload") {
   }
 
   cinatra::coro_http_server server1(1, 9002);
-  server1.init_ssl("../../include/cinatra/server.crt",
-                   "../../include/cinatra/server.key", "test");
+  server1.init_ssl("ssl_data/server.crt",
+                   "ssl_data/server.key", "test");
   server1.set_http_handler<cinatra::GET, cinatra::PUT>(
       "/chunked",
       [](coro_http_request &req,

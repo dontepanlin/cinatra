@@ -9,7 +9,7 @@ required_conan_version = ">=1.50.0"
 
 class CinatraConan(ConanFile):
     name = "cinatra"
-    version = "0.8.6"
+    version = "0.9.5"
     url = "https://github.com/qicosmos/cinatra"
     description = "Cinatra - an efficient and easy-to-use C++ HTTP framework"
     topics = "http", "header-only"
@@ -30,7 +30,6 @@ class CinatraConan(ConanFile):
 
     def requirements(self):
         self.requires("asio/1.30.2")
-        self.requires("async_simple/1.2")
 
     def package(self):
         copy(self, "LICENSE", dst=osp.join(self.package_folder, "licenses"), src=self.source_folder)

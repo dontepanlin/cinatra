@@ -1,10 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
 project(cinatra_test)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
-set(project_name test_cinatra)
 add_definitions(-DINJECT_FOR_HTTP_CLIENT_TEST)
 add_definitions(-DINJECT_FOR_HTTP_SEVER_TEST)
-add_executable(${project_name}
+add_executable(${PROJECT_NAME}
 		test_coro_http_server.cpp
         test_cinatra.cpp
         test_cinatra_websocket.cpp
@@ -12,7 +11,7 @@ add_executable(${project_name}
         main.cpp
         )
 target_compile_definitions(${PROJECT_NAME} PRIVATE ASYNC_SIMPLE_HAS_NOT_AIO INJECT_FOR_HTTP_CLIENT_TEST)
-target_link_libraries(${PROJECT_NAME} PRIVATE cinatra)
+target_link_libraries(${PROJECT_NAME} cinatra)
 
 find_package(ZLIB)
 if (ZLIB_FOUND)
@@ -25,15 +24,15 @@ if(SKIP_TIME_TEST)
     add_definitions(-DSKIP_TIME_TEST)
 endif()
 
-add_test(NAME ${PROJECT_NAME} COMMAND test_cinatra)
+add_test(NAME ${PROJECT_NAME} COMMAND ${PROJECT_NAME})
 
 if (ZLIB_FOUND)
-	target_link_libraries(${project_name} ${ZLIB_LIBRARIES})
+	target_link_libraries(${PROJECT_NAME} ${ZLIB_LIBRARIES})
 endif()
 
 if (ENABLE_BROTLI)
 	include_directories(${BROTLI_INCLUDE_DIRS})
-	target_link_libraries(${project_name} ${BROTLI_LIBRARIES})
+	target_link_libraries(${PROJECT_NAME} ${BROTLI_LIBRARIES})
 endif()
 
 # test_coro_file
@@ -94,7 +93,7 @@ add_executable(test_metric
 if (ENABLE_SSL)
     find_package(OpenSSL REQUIRED)
     add_definitions(-DCINATRA_ENABLE_SSL)
-    target_link_libraries(test_cinatra  OpenSSL::SSL OpenSSL::Crypto)
+    target_link_libraries(${PROJECT_NAME}  OpenSSL::SSL OpenSSL::Crypto)
 	target_link_libraries(test_metric  OpenSSL::SSL OpenSSL::Crypto)
 endif ()
 
@@ -139,3 +138,6 @@ elseif (ENABLE_SIMD STREQUAL "AVX2")
 endif ()
 
 add_test(NAME test_http_parse COMMAND test_http_parse)
+
+configure_file(ssl_data/server.crt ssl_data/server.crt COPYONLY)
+configure_file(ssl_data/server.key ssl_data/server.key COPYONLY)
