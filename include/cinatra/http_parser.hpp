@@ -28,6 +28,21 @@ inline bool iequal0(std::string_view a, std::string_view b) {
 
 class http_parser {
  public:
+  void parse_body_len() {
+    auto header_value = this->get_header_value("content-length"sv);
+    if (header_value.empty()) {
+      body_len_ = 0;
+    }
+    else {
+      auto [ptr, ec] = std::from_chars(
+          header_value.data(), header_value.data() + header_value.size(),
+          body_len_, 10);
+      if (ec != std::errc{}) {
+        body_len_ = -1;
+      }
+    }
+  }
+
   int parse_response(const char *data, size_t size, int last_len) {
     int minor_version;
 
@@ -38,20 +53,11 @@ class http_parser {
         data, size, &minor_version, &status_, &msg, &msg_len, headers_.data(),
         &num_headers_, last_len);
     msg_ = {msg, msg_len};
-    auto header_value = this->get_header_value("content-length"sv);
-    if (header_value.empty()) {
-      body_len_ = 0;
-    }
-    else {
-      body_len_ = atoi(header_value.data());
-    }
+    parse_body_len();
     if (header_len_ < 0) [[unlikely]] {
       CINATRA_LOG_WARNING << "parse http head failed";
-      if (size == CINATRA_MAX_HTTP_HEADER_FIELD_SIZE) {
-        CINATRA_LOG_ERROR << "the field of http head is out of max limit "
-                          << CINATRA_MAX_HTTP_HEADER_FIELD_SIZE
-                          << ", you can define macro "
-                             "CINATRA_MAX_HTTP_HEADER_FIELD_SIZE to expand it.";
+      if (num_headers_ == CINATRA_MAX_HTTP_HEADER_FIELD_SIZE) {
+        output_error();
       }
     }
     return header_len_;
@@ -75,11 +81,8 @@ class http_parser {
 
     if (header_len_ < 0) [[unlikely]] {
       CINATRA_LOG_WARNING << "parse http head failed";
-      if (size == CINATRA_MAX_HTTP_HEADER_FIELD_SIZE) {
-        CINATRA_LOG_ERROR << "the field of http head is out of max limit "
-                          << CINATRA_MAX_HTTP_HEADER_FIELD_SIZE
-                          << ", you can define macro "
-                             "CINATRA_MAX_HTTP_HEADER_FIELD_SIZE to expand it.";
+      if (num_headers_ == CINATRA_MAX_HTTP_HEADER_FIELD_SIZE) {
+        output_error();
       }
       return header_len_;
     }
@@ -92,13 +95,7 @@ class http_parser {
       body_len_ = 0;
     }
     else {
-      auto content_len = this->get_header_value("content-length"sv);
-      if (content_len.empty()) {
-        body_len_ = 0;
-      }
-      else {
-        body_len_ = atoi(content_len.data());
-      }
+      parse_body_len();
     }
 
     full_url_ = url_;
@@ -173,11 +170,6 @@ class http_parser {
     return content_type.substr(pos + 1);
   }
 
-  bool is_req_ranges() const {
-    auto value = this->get_header_value("Range"sv);
-    return !value.empty();
-  }
-
   bool is_resp_ranges() const {
     auto value = this->get_header_value("Accept-Ranges"sv);
     return !value.empty();
@@ -204,9 +196,9 @@ class http_parser {
 
   int header_len() const { return header_len_; }
 
-  int body_len() const { return body_len_; }
+  int64_t body_len() const { return body_len_; }
 
-  int total_len() const { return header_len_ + body_len_; }
+  int64_t total_len() const { return header_len_ + body_len_; }
 
   bool is_location() {
     auto location = this->get_header_value("Location"sv);
@@ -248,11 +240,12 @@ class http_parser {
     }
   }
 
-  std::string_view trim(std::string_view v) {
-    v.remove_prefix((std::min)(v.find_first_not_of(" "), v.size()));
-    v.remove_suffix(
-        (std::min)(v.size() - v.find_last_not_of(" ") - 1, v.size()));
-    return v;
+ private:
+  void output_error() {
+    CINATRA_LOG_ERROR << "the field of http head is out of max limit "
+                      << CINATRA_MAX_HTTP_HEADER_FIELD_SIZE
+                      << ", you can define macro "
+                         "CINATRA_MAX_HTTP_HEADER_FIELD_SIZE to expand it.";
   }
 
  private:
@@ -260,7 +253,7 @@ class http_parser {
   std::string_view msg_;
   size_t num_headers_ = 0;
   int header_len_ = 0;
-  int body_len_ = 0;
+  int64_t body_len_ = 0;
   bool has_connection_{};
   bool has_close_{};
   bool has_upgrade_{};

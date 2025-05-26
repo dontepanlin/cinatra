@@ -21,14 +21,9 @@
 #include "sha1.hpp"
 #include "string_resize.hpp"
 #include "websocket.hpp"
-#include "ylt/metric/counter.hpp"
-#include "ylt/metric/gauge.hpp"
-#include "ylt/metric/histogram.hpp"
-#include "ylt/metric/metric.hpp"
 #ifdef CINATRA_ENABLE_GZIP
 #include "gzip.hpp"
 #endif
-#include "metric_conf.hpp"
 #include "ylt/coro_io/coro_file.hpp"
 #include "ylt/coro_io/coro_io.hpp"
 
@@ -52,14 +47,9 @@ class coro_http_connection
         request_(parser_, this),
         response_(this) {
     buffers_.reserve(3);
-
-    cinatra_metric_conf::server_total_fd_inc();
   }
 
-  ~coro_http_connection() {
-    cinatra_metric_conf::server_total_fd_dec();
-    close();
-  }
+  ~coro_http_connection() { close(); }
 
 #ifdef CINATRA_ENABLE_SSL
   bool init_ssl(const std::string &cert_file, const std::string &key_file,
@@ -126,21 +116,28 @@ class coro_http_connection
           CINATRA_LOG_WARNING << "read http header error: " << ec.message();
         }
 
-        cinatra_metric_conf::server_failed_req_inc();
         close();
         break;
-      }
-
-      if (cinatra_metric_conf::enable_metric) {
-        start = std::chrono::system_clock::now();
-        cinatra_metric_conf::server_total_req_inc();
       }
 
       const char *data_ptr = asio::buffer_cast<const char *>(head_buf_.data());
       int head_len = parser_.parse_request(data_ptr, size, 0);
       if (head_len <= 0) {
-        cinatra_metric_conf::server_failed_req_inc();
         CINATRA_LOG_ERROR << "parse http header error";
+        response_.set_status_and_content(status_type::bad_request,
+                                         "invalid http protocol");
+        co_await reply();
+        close();
+        break;
+      }
+
+      if (parser_.body_len() > max_http_body_len_ || parser_.body_len() < 0)
+          [[unlikely]] {
+        CINATRA_LOG_ERROR << "invalid http content length: "
+                          << parser_.body_len();
+        response_.set_status_and_content(status_type::bad_request,
+                                         "invalid http content length");
+        co_await reply();
         close();
         break;
       }
@@ -151,11 +148,8 @@ class coro_http_connection
       auto type = request_.get_content_type();
 
       if (type != content_type::chunked && type != content_type::multipart) {
-        size_t body_len = parser_.body_len();
+        size_t body_len = (size_t)parser_.body_len();
         if (body_len == 0) {
-          if (cinatra_metric_conf::enable_metric) {
-            cinatra_metric_conf::server_total_recv_bytes_inc(head_len);
-          }
           if (parser_.method() == "GET"sv) {
             if (request_.is_upgrade()) {
 #ifdef CINATRA_ENABLE_GZIP
@@ -175,16 +169,6 @@ class coro_http_connection
               }
               response_.set_delay(true);
             }
-            else {
-              if (cinatra_metric_conf::enable_metric) {
-                mid = std::chrono::system_clock::now();
-                double count =
-                    std::chrono::duration_cast<std::chrono::microseconds>(mid -
-                                                                          start)
-                        .count();
-                cinatra_metric_conf::server_read_latency_observe(count);
-              }
-            }
           }
         }
         else if (body_len <= head_buf_.size()) {
@@ -194,7 +178,6 @@ class coro_http_connection
             memcpy(body_.data(), data_ptr, body_len);
             head_buf_.consume(head_buf_.size());
           }
-          cinatra_metric_conf::server_total_recv_bytes_inc(head_len + body_len);
         }
         else {
           size_t part_size = head_buf_.size();
@@ -209,21 +192,8 @@ class coro_http_connection
               size_to_read);
           if (ec) {
             CINATRA_LOG_ERROR << "async_read error: " << ec.message();
-            cinatra_metric_conf::server_failed_req_inc();
             close();
             break;
-          }
-          else {
-            if (cinatra_metric_conf::enable_metric) {
-              cinatra_metric_conf::server_total_recv_bytes_inc(head_len +
-                                                               body_len);
-              mid = std::chrono::system_clock::now();
-              double count =
-                  std::chrono::duration_cast<std::chrono::microseconds>(mid -
-                                                                        start)
-                      .count();
-              cinatra_metric_conf::server_read_latency_observe(count);
-            }
           }
         }
       }
@@ -250,83 +220,85 @@ class coro_http_connection
           co_await router_.route_coro(coro_handler, request_, response_, key);
         }
         else {
-          if (default_handler_) {
-            co_await default_handler_(request_, response_);
+          bool is_exist = false;
+          bool is_coro_exist = false;
+          bool is_matched_regex_router = false;
+          std::function<void(coro_http_request & req,
+                             coro_http_response & resp)>
+              handler;
+          std::string method_str{parser_.method()};
+          std::string url_path = method_str;
+          url_path.append(" ").append(parser_.url());
+          std::tie(is_exist, handler, request_.params_) =
+              router_.get_router_tree()->get(url_path, method_str);
+          if (is_exist) {
+            if (handler) {
+              (handler)(request_, response_);
+            }
+            else {
+              response_.set_status(status_type::not_found);
+            }
           }
           else {
-            bool is_exist = false;
-            std::function<void(coro_http_request & req,
-                               coro_http_response & resp)>
-                handler;
-            std::string method_str{parser_.method()};
-            std::string url_path = method_str;
-            url_path.append(" ").append(parser_.url());
-            std::tie(is_exist, handler, request_.params_) =
-                router_.get_router_tree()->get(url_path, method_str);
-            if (is_exist) {
-              if (handler) {
-                (handler)(request_, response_);
+            std::function<async_simple::coro::Lazy<void>(
+                coro_http_request & req, coro_http_response & resp)>
+                coro_handler;
+
+            std::tie(is_coro_exist, coro_handler, request_.params_) =
+                router_.get_coro_router_tree()->get_coro(url_path, method_str);
+
+            if (is_coro_exist) {
+              if (coro_handler) {
+                co_await coro_handler(request_, response_);
               }
               else {
                 response_.set_status(status_type::not_found);
               }
             }
             else {
-              bool is_coro_exist = false;
-              std::function<async_simple::coro::Lazy<void>(
-                  coro_http_request & req, coro_http_response & resp)>
-                  coro_handler;
+              // coro regex router
+              auto coro_regex_handlers = router_.get_coro_regex_handlers();
+              if (coro_regex_handlers.size() != 0) {
+                for (auto &pair : coro_regex_handlers) {
+                  std::string coro_regex_key{key};
 
-              std::tie(is_coro_exist, coro_handler, request_.params_) =
-                  router_.get_coro_router_tree()->get_coro(url_path,
-                                                           method_str);
-
-              if (is_coro_exist) {
-                if (coro_handler) {
-                  co_await coro_handler(request_, response_);
-                }
-                else {
-                  response_.set_status(status_type::not_found);
+                  if (std::regex_match(coro_regex_key, request_.matches_,
+                                       std::get<0>(pair))) {
+                    auto coro_handler = std::get<1>(pair);
+                    if (coro_handler) {
+                      co_await coro_handler(request_, response_);
+                      is_matched_regex_router = true;
+                    }
+                  }
                 }
               }
-              else {
-                bool is_matched_regex_router = false;
-                // coro regex router
-                auto coro_regex_handlers = router_.get_coro_regex_handlers();
-                if (coro_regex_handlers.size() != 0) {
-                  for (auto &pair : coro_regex_handlers) {
-                    std::string coro_regex_key{key};
-
-                    if (std::regex_match(coro_regex_key, request_.matches_,
+              // regex router
+              if (!is_matched_regex_router) {
+                auto regex_handlers = router_.get_regex_handlers();
+                if (regex_handlers.size() != 0) {
+                  for (auto &pair : regex_handlers) {
+                    std::string regex_key{key};
+                    if (std::regex_match(regex_key, request_.matches_,
                                          std::get<0>(pair))) {
-                      auto coro_handler = std::get<1>(pair);
-                      if (coro_handler) {
-                        co_await coro_handler(request_, response_);
+                      auto handler = std::get<1>(pair);
+                      if (handler) {
+                        (handler)(request_, response_);
                         is_matched_regex_router = true;
                       }
                     }
                   }
                 }
-                // regex router
-                if (!is_matched_regex_router) {
-                  auto regex_handlers = router_.get_regex_handlers();
-                  if (regex_handlers.size() != 0) {
-                    for (auto &pair : regex_handlers) {
-                      std::string regex_key{key};
-                      if (std::regex_match(regex_key, request_.matches_,
-                                           std::get<0>(pair))) {
-                        auto handler = std::get<1>(pair);
-                        if (handler) {
-                          (handler)(request_, response_);
-                          is_matched_regex_router = true;
-                        }
-                      }
-                    }
-                  }
+              }
+              // radix route -> radix coro route -> regex coro -> regex ->
+              // default -> not found
+              if (!is_matched_regex_router) {
+                if (default_handler_) {
+                  co_await default_handler_(request_, response_);
                 }
-                // not found
-                if (!is_matched_regex_router)
+                else {
+                  // not found
                   response_.set_status(status_type::not_found);
+                }
               }
             }
           }
@@ -335,10 +307,12 @@ class coro_http_connection
 
       if (!response_.get_delay()) {
         if (head_buf_.size()) {
-          if (type == content_type::multipart) {
-            response_.set_status_and_content(
-                status_type::not_implemented,
-                "mutipart handler not implemented or incorrect implemented");
+          if (type == content_type::multipart ||
+              type == content_type::chunked) {
+            if (response_.content().empty())
+              response_.set_status_and_content(
+                  status_type::not_implemented,
+                  "mutipart handler not implemented or incorrect implemented");
             co_await reply();
             close();
             CINATRA_LOG_ERROR
@@ -358,36 +332,43 @@ class coro_http_connection
 
             while (true) {
               size_t left_size = head_buf_.size();
-              auto data_ptr = asio::buffer_cast<const char *>(head_buf_.data());
-              std::string_view left_content{data_ptr, left_size};
+              auto next_data_ptr =
+                  asio::buffer_cast<const char *>(head_buf_.data());
+              std::string_view left_content{next_data_ptr, left_size};
               size_t pos = left_content.find(TWO_CRCF);
               if (pos == std::string_view::npos) {
                 break;
               }
               http_parser parser;
-              int head_len = parser.parse_request(data_ptr, size, 0);
+              int head_len = parser.parse_request(next_data_ptr, left_size, 0);
               if (head_len <= 0) {
                 CINATRA_LOG_ERROR << "parse http header error";
+                response_.set_status_and_content(status_type::bad_request,
+                                                 "invalid http protocol");
+                co_await reply();
                 close();
                 break;
               }
 
               head_buf_.consume(pos + TWO_CRCF.length());
 
-              std::string_view key = {
-                  parser_.method().data(),
-                  parser_.method().length() + 1 + parser_.url().length()};
+              std::string_view next_key = {
+                  parser.method().data(),
+                  parser.method().length() + 1 + parser.url().length()};
 
               coro_http_request req(parser, this);
               coro_http_response resp(this);
               resp.need_date_head(response_.need_date());
-              if (auto handler = router_.get_handler(key); handler) {
+              if (auto handler = router_.get_handler(next_key); handler) {
                 router_.route(handler, req, resp, key);
               }
               else {
-                if (auto coro_handler = router_.get_coro_handler(key);
+                if (auto coro_handler = router_.get_coro_handler(next_key);
                     coro_handler) {
                   co_await router_.route_coro(coro_handler, req, resp, key);
+                }
+                else {
+                  resp.set_status(status_type::not_found);
                 }
               }
 
@@ -409,12 +390,9 @@ class coro_http_connection
         }
       }
 
-      if (cinatra_metric_conf::enable_metric) {
-        mid = std::chrono::system_clock::now();
-        double count =
-            std::chrono::duration_cast<std::chrono::microseconds>(mid - start)
-                .count();
-        cinatra_metric_conf::server_req_latency_observe(count);
+      if (!keep_alive_) {
+        // now in io thread, so can close socket immediately.
+        close();
       }
 
       response_.clear();
@@ -427,34 +405,24 @@ class coro_http_connection
         body_.shrink_to_fit();
       }
     }
+
+    if(head_buf_.size()) {
+      head_buf_.consume(head_buf_.size());
+    }
   }
 
   async_simple::coro::Lazy<bool> reply(bool need_to_bufffer = true) {
-    if (response_.status() >= status_type::bad_request) {
-      if (cinatra_metric_conf::enable_metric)
-        cinatra_metric_conf::server_failed_req_inc();
-    }
     std::error_code ec;
     size_t size;
     if (multi_buf_) {
       if (need_to_bufffer) {
         response_.to_buffers(buffers_, chunk_size_str_);
       }
-      int64_t send_size = 0;
-      for (auto &buf : buffers_) {
-        send_size += buf.size();
-      }
-      if (cinatra_metric_conf::enable_metric) {
-        cinatra_metric_conf::server_total_send_bytes_inc(send_size);
-      }
       std::tie(ec, size) = co_await async_write(buffers_);
     }
     else {
       if (need_to_bufffer) {
         response_.build_resp_str(resp_str_);
-      }
-      if (cinatra_metric_conf::enable_metric) {
-        cinatra_metric_conf::server_total_send_bytes_inc(resp_str_.size());
       }
       std::tie(ec, size) = co_await async_write(asio::buffer(resp_str_));
     }
@@ -463,11 +431,6 @@ class coro_http_connection
       CINATRA_LOG_ERROR << "async_write error: " << ec.message();
       close();
       co_return false;
-    }
-
-    if (!keep_alive_) {
-      // now in io thread, so can close socket immediately.
-      close();
     }
 
     co_return true;
@@ -487,6 +450,11 @@ class coro_http_connection
     return remote_addr_;
   }
 
+  size_t available() {
+    std::error_code ec{};
+    return socket_.available(ec);
+  }
+
   void set_multi_buf(bool r) { multi_buf_ = r; }
 
   void set_default_handler(
@@ -494,6 +462,16 @@ class coro_http_connection
           coro_http_request &, coro_http_response &)> &handler) {
     default_handler_ = handler;
   }
+
+  void set_max_http_body_size(int64_t max_size) {
+    max_http_body_len_ = max_size;
+  }
+
+#ifdef INJECT_FOR_HTTP_SEVER_TEST
+  void set_write_failed_forever(bool r) { write_failed_forever_ = r; }
+
+  void set_read_failed_forever(bool r) { read_failed_forever_ = r; }
+#endif
 
   async_simple::coro::Lazy<bool> write_data(std::string_view message) {
     std::vector<asio::const_buffer> buffers;
@@ -505,15 +483,8 @@ class coro_http_connection
       co_return false;
     }
 
-    if (!keep_alive_) {
-      // now in io thread, so can close socket immediately.
-      close();
-    }
-
     co_return true;
   }
-
-  bool sync_reply() { return async_simple::coro::syncAwait(reply()); }
 
   async_simple::coro::Lazy<bool> begin_chunked() {
     response_.set_delay(true);
@@ -645,7 +616,7 @@ class coro_http_connection
     std::string dest_buf;
     if (is_client_ws_compressed_ && msg.size() > 0) {
       if (!cinatra::gzip_codec::deflate(msg, dest_buf)) {
-        CINATRA_LOG_ERROR << "compuress data error, data: " << msg;
+        CINATRA_LOG_ERROR << "compress data error, data: " << msg;
         co_return std::make_error_code(std::errc::protocol_error);
       }
 
@@ -681,6 +652,18 @@ class coro_http_connection
         head_buf_.consume(head_buf_.size());
         std::span<char> payload{};
         auto payload_length = ws_.payload_length();
+
+        if (max_part_size_ != 0 && payload_length > max_part_size_) {
+          std::string close_reason = "message_too_big";
+          std::string close_msg = ws_.format_close_payload(
+              close_code::too_big, close_reason.data(), close_reason.size());
+          co_await write_websocket(close_msg, opcode::close);
+          close();
+          result.ec = std::error_code(asio::error::message_size,
+                                      asio::error::get_system_category());
+          break;
+        }
+
         if (payload_length > 0) {
           detail::resize(body_, payload_length);
           auto [ec, read_sz] =
@@ -693,19 +676,11 @@ class coro_http_connection
           payload = body_;
         }
 
-        if (max_part_size_ != 0 && payload_length > max_part_size_) {
-          std::string close_reason = "message_too_big";
-          std::string close_msg = ws_.format_close_payload(
-              close_code::too_big, close_reason.data(), close_reason.size());
-          co_await write_websocket(close_msg, opcode::close);
-          close();
-          break;
-        }
-
         ws_frame_type type = ws_.parse_payload(payload);
 
         switch (type) {
           case cinatra::ws_frame_type::WS_ERROR_FRAME:
+            close();
             result.ec = std::make_error_code(std::errc::protocol_error);
             break;
           case cinatra::ws_frame_type::WS_OPENING_FRAME:
@@ -718,28 +693,19 @@ class coro_http_connection
           case cinatra::ws_frame_type::WS_TEXT_FRAME:
           case cinatra::ws_frame_type::WS_BINARY_FRAME: {
 #ifdef CINATRA_ENABLE_GZIP
-            if (is_client_ws_compressed_) {
-              inflate_str_.clear();
-              if (!cinatra::gzip_codec::inflate(
-                      {payload.data(), payload.size()}, inflate_str_)) {
-                CINATRA_LOG_ERROR << "uncompuress data error";
-                result.ec = std::make_error_code(std::errc::protocol_error);
-                break;
-              }
-              result.eof = true;
-              result.data = {inflate_str_.data(), inflate_str_.size()};
+            if (!gzip_compress(payload, result)) {
               break;
             }
-            else {
 #endif
-              result.eof = true;
-              result.data = {payload.data(), payload.size()};
-              break;
-#ifdef CINATRA_ENABLE_GZIP
-            }
-#endif
+            result.eof = true;
+            result.data = {payload.data(), payload.size()};
           } break;
           case cinatra::ws_frame_type::WS_CLOSE_FRAME: {
+#ifdef CINATRA_ENABLE_GZIP
+            if (!gzip_compress(payload, result)) {
+              break;
+            }
+#endif
             close_frame close_frame =
                 ws_.parse_close_payload(payload.data(), payload.size());
             result.eof = true;
@@ -753,7 +719,7 @@ class coro_http_connection
           } break;
           case cinatra::ws_frame_type::WS_PING_FRAME: {
             result.data = {payload.data(), payload.size()};
-            auto ec = co_await write_websocket("pong", opcode::pong);
+            auto ec = co_await write_websocket(result.data, opcode::pong);
             if (ec) {
               close();
               result.ec = ec;
@@ -761,7 +727,7 @@ class coro_http_connection
           } break;
           case cinatra::ws_frame_type::WS_PONG_FRAME: {
             result.data = {payload.data(), payload.size()};
-            auto ec = co_await write_websocket("ping", opcode::ping);
+            auto ec = co_await write_websocket(result.data, opcode::ping);
             result.ec = ec;
           } break;
           default:
@@ -790,6 +756,22 @@ class coro_http_connection
     co_return result;
   }
 
+#ifdef CINATRA_ENABLE_GZIP
+  bool gzip_compress(std::span<char> &payload, websocket_result &result) {
+    if (is_client_ws_compressed_) {
+      inflate_str_.clear();
+      if (!cinatra::gzip_codec::inflate({payload.data(), payload.size()},
+                                        inflate_str_)) {
+        CINATRA_LOG_ERROR << "compress data error";
+        result.ec = std::make_error_code(std::errc::protocol_error);
+        return false;
+      }
+      payload = inflate_str_;
+    }
+    return true;
+  }
+#endif
+
   auto &tcp_socket() { return socket_; }
 
   void set_quit_callback(std::function<void(const uint64_t &conn_id)> callback,
@@ -805,9 +787,26 @@ class coro_http_connection
     response_.set_shrink_to_fit(r);
   }
 
+#ifdef INJECT_FOR_HTTP_SEVER_TEST
+  async_simple::coro::Lazy<std::pair<std::error_code, size_t>>
+  async_write_failed() {
+    co_return std::make_pair(std::make_error_code(std::errc::io_error), 0);
+  }
+
+  async_simple::coro::Lazy<std::pair<std::error_code, size_t>>
+  async_read_failed() {
+    co_return std::make_pair(std::make_error_code(std::errc::io_error), 0);
+  }
+#endif
+
   template <typename AsioBuffer>
   async_simple::coro::Lazy<std::pair<std::error_code, size_t>> async_read(
       AsioBuffer &&buffer, size_t size_to_read) noexcept {
+#ifdef INJECT_FOR_HTTP_SEVER_TEST
+    if (read_failed_forever_) {
+      return async_read_failed();
+    }
+#endif
     set_last_time();
 #ifdef CINATRA_ENABLE_SSL
     if (use_ssl_) {
@@ -824,6 +823,11 @@ class coro_http_connection
   template <typename AsioBuffer>
   async_simple::coro::Lazy<std::pair<std::error_code, size_t>> async_write(
       AsioBuffer &&buffer) {
+#ifdef INJECT_FOR_HTTP_SEVER_TEST
+    if (write_failed_forever_) {
+      return async_write_failed();
+    }
+#endif
     set_last_time();
 #ifdef CINATRA_ENABLE_SSL
     if (use_ssl_) {
@@ -917,7 +921,7 @@ class coro_http_connection
 
     code_utils::base64_encode(accept_key, sha1buf, sizeof(sha1buf), 0);
 
-    response_.set_status_and_content(status_type::switching_protocols);
+    response_.set_status_and_content(status_type::switching_protocols, "");
 
     response_.add_header("Upgrade", "WebSocket");
     response_.add_header("Connection", "Upgrade");
@@ -968,7 +972,8 @@ class coro_http_connection
   uint64_t conn_id_{0};
   std::function<void(const uint64_t &conn_id)> quit_cb_ = nullptr;
   bool checkout_timeout_ = false;
-  std::atomic<std::chrono::system_clock::time_point> last_rwtime_;
+  std::atomic<std::chrono::system_clock::time_point> last_rwtime_ =
+      std::chrono::system_clock::now();
   uint64_t max_part_size_ = 8 * 1024 * 1024;
   std::string resp_str_;
 
@@ -990,5 +995,10 @@ class coro_http_connection
       default_handler_ = nullptr;
   std::string chunk_size_str_;
   std::string remote_addr_;
+  int64_t max_http_body_len_ = 0;
+#ifdef INJECT_FOR_HTTP_SEVER_TEST
+  bool write_failed_forever_ = false;
+  bool read_failed_forever_ = false;
+#endif
 };
 }  // namespace cinatra

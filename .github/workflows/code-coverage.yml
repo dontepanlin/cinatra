@@ -14,7 +14,7 @@ jobs:
         fetch-depth: 2
     
     - name: Configure cmake
-      run:  cmake -B${{github.workspace}}/build -DCOVERAGE_TEST=ON -DCINATRA_ENABLE_SSL=ON -DCMAKE_BUILD_TYPE=Debug
+      run:  cmake -B${{github.workspace}}/build -DCOVERAGE_TEST=ON -DENABLE_SSL=ON -DCINATRA_ENABLE_SSL=ON -DCMAKE_BUILD_TYPE=Debug
 
     - name: Build with ${{ matrix.compiler }}
       run:  cmake --build ${{github.workspace}}/build --config Debug
@@ -23,7 +23,7 @@ jobs:
       working-directory: ${{github.workspace}}/build
       env:
         CTEST_OUTPUT_ON_FAILURE: 1
-      run: ctest -C ${{ matrix.configuration }} -j `nproc` -V
+      run: ctest ${{ matrix.configuration }} -j `nproc` -V
     
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v1

@@ -1,16 +1,29 @@
+/*
+ * Copyright (c) 2023, Alibaba Group Holding Limited;
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 #pragma once
+
 #include <async_simple/Executor.h>
+#include <async_simple/coro/Collect.h>
 #include <async_simple/coro/Lazy.h>
 #include <async_simple/coro/Sleep.h>
 #include <async_simple/coro/SyncAwait.h>
 
-#include "async_simple/coro/Collect.h"
-
 #if defined(YLT_ENABLE_SSL) || defined(CINATRA_ENABLE_SSL)
 #include <asio/ssl.hpp>
 #endif
-
-#include <async_simple/coro/Lazy.h>
 
 #include <asio/connect.hpp>
 #include <asio/experimental/channel.hpp>
@@ -23,8 +36,12 @@
 #include <chrono>
 #include <deque>
 
-#include "../util/type_traits.h"
 #include "io_context_pool.hpp"
+#if __has_include("ylt/util/type_traits.h")
+#include "ylt/util/type_traits.h"
+#else
+#include "../util/type_traits.h"
+#endif
 #ifdef __linux__
 #include <sys/sendfile.h>
 #endif
@@ -254,7 +271,7 @@ inline async_simple::coro::Lazy<void> async_close(Socket &socket) noexcept {
   });
 }
 
-#if defined(ENABLE_SSL) || defined(CINATRA_ENABLE_SSL)
+#if defined(YLT_ENABLE_SSL) || defined(CINATRA_ENABLE_SSL)
 inline async_simple::coro::Lazy<std::error_code> async_handshake(
     auto &ssl_stream, asio::ssl::stream_base::handshake_type type) noexcept {
   callback_awaitor<std::error_code> awaitor;
@@ -347,12 +364,11 @@ post(Func func,
 }
 
 template <typename R>
-struct coro_channel
-    : public asio::experimental::channel<void(std::error_code, R)> {
+struct channel : public asio::experimental::channel<void(std::error_code, R)> {
   using return_type = R;
   using ValueType = std::pair<std::error_code, R>;
   using asio::experimental::channel<void(std::error_code, R)>::channel;
-  coro_channel(coro_io::ExecutorWrapper<> *executor, size_t capacity)
+  channel(coro_io::ExecutorWrapper<> *executor, size_t capacity)
       : executor_(executor),
         asio::experimental::channel<void(std::error_code, R)>(
             executor->get_asio_executor(), capacity) {}
@@ -363,17 +379,17 @@ struct coro_channel
 };
 
 template <typename R>
-inline coro_channel<R> create_channel(
+inline channel<R> create_channel(
     size_t capacity,
     coro_io::ExecutorWrapper<> *executor = coro_io::get_global_executor()) {
-  return coro_channel<R>(executor, capacity);
+  return channel<R>(executor, capacity);
 }
 
 template <typename R>
 inline auto create_shared_channel(
     size_t capacity,
     coro_io::ExecutorWrapper<> *executor = coro_io::get_global_executor()) {
-  return std::make_shared<coro_channel<R>>(executor, capacity);
+  return std::make_shared<channel<R>>(executor, capacity);
 }
 
 template <typename T>
@@ -524,6 +540,8 @@ inline auto pipe_signal_handler = [] {
   return 0;
 }();
 
+// FIXME: this function may not thread-safe if it not running in socket's
+// executor
 inline async_simple::coro::Lazy<std::pair<std::error_code, std::size_t>>
 async_sendfile(asio::ip::tcp::socket &socket, int fd, off_t offset,
                size_t size) noexcept {
@@ -559,7 +577,6 @@ async_sendfile(asio::ip::tcp::socket &socket, int fd, off_t offset,
                               handler.set_value_then_resume(ec);
                             });
         });
-        continue;
       }
       if (ec || n == 0 || least_bytes == 0) [[unlikely]] {  // End of File
         break;

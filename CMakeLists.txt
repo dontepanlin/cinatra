@@ -4,6 +4,7 @@ project(cinatra)
 find_package(Threads REQUIRED)
 find_package(asio REQUIRED)
 
+include(cmake/find_openssl.cmake)
 include(cmake/build.cmake)
 include(cmake/develop.cmake)
 

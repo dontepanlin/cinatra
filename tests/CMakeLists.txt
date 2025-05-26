@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.15)
 project(cinatra_test)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
-add_executable(${PROJECT_NAME}
+set(project_name test_cinatra)
+add_definitions(-DINJECT_FOR_HTTP_CLIENT_TEST)
+add_definitions(-DINJECT_FOR_HTTP_SEVER_TEST)
+add_executable(${project_name}
 		test_coro_http_server.cpp
         test_cinatra.cpp
         test_cinatra_websocket.cpp
@@ -11,6 +14,11 @@ add_executable(${PROJECT_NAME}
 target_compile_definitions(${PROJECT_NAME} PRIVATE ASYNC_SIMPLE_HAS_NOT_AIO INJECT_FOR_HTTP_CLIENT_TEST)
 target_link_libraries(${PROJECT_NAME} PRIVATE cinatra)
 
+find_package(ZLIB)
+if (ZLIB_FOUND)
+    add_definitions(-DCINATRA_ENABLE_GZIP)
+endif ()
+
 option(SKIP_TIME_TEST "skip time tests" OFF)
 if(SKIP_TIME_TEST)
 	message(STATUS "skip time tests")
@@ -19,8 +27,8 @@ endif()
 
 add_test(NAME ${PROJECT_NAME} COMMAND test_cinatra)
 
-if (ENABLE_GZIP)
-	target_link_libraries(${PROJECT_NAME} ${ZLIB_LIBRARIES})
+if (ZLIB_FOUND)
+	target_link_libraries(${project_name} ${ZLIB_LIBRARIES})
 endif()
 
 if (ENABLE_BROTLI)
@@ -59,11 +67,17 @@ add_executable(test_corofile
         )
 
 if(ENABLE_FILE_IO_URING)
-if (UNIX)
-        target_link_libraries(test_corofile PRIVATE uring)
-endif()
+  if (UNIX)
+	if (ENABLE_SSL)
+		target_link_libraries(test_corofile PRIVATE uring OpenSSL::SSL OpenSSL::Crypto)
+	else()
+		target_link_libraries(test_corofile PRIVATE uring)
+	endif()
+  endif()
 else()
-        target_link_libraries(test_corofile PRIVATE)
+  if (ENABLE_SSL)
+	target_link_libraries(test_corofile PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+  endif()
 endif()
 
 add_test(NAME test_corofile COMMAND test_corofile)
@@ -78,17 +92,22 @@ add_executable(test_metric
         )
 
 if (ENABLE_SSL)
-    message(STATUS "Use SSL")
     find_package(OpenSSL REQUIRED)
     add_definitions(-DCINATRA_ENABLE_SSL)
     target_link_libraries(test_cinatra  OpenSSL::SSL OpenSSL::Crypto)
-    target_link_libraries(test_corofile  OpenSSL::SSL OpenSSL::Crypto)
 	target_link_libraries(test_metric  OpenSSL::SSL OpenSSL::Crypto)
 endif ()
 
 add_executable(test_http_parse
         test_http_parse.cpp
         )
+if (UNIX)
+	if (ENABLE_SSL)
+		target_link_libraries(test_http_parse ${ZLIB_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto)
+	elseif()
+		target_link_libraries(test_http_parse ${ZLIB_LIBRARIES})
+	endif()
+endif()
 
 if (ENABLE_SIMD STREQUAL "AARCH64")
 	if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
