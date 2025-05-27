@@ -16,8 +16,7 @@ class CinatraConan(ConanFile):
     license = "MIT"
     package_type = "header-library"
     settings = "os", "arch", "compiler", "build_type"
-    no_copy_source = True
-    exports_sources = "include/*", "tests/*"
+    exports_sources = "include/*"
     generators = "CMakeToolchain", "CMakeDeps"
 
     @property
@@ -33,7 +32,7 @@ class CinatraConan(ConanFile):
 
     def package(self):
         copy(self, "LICENSE", dst=osp.join(self.package_folder, "licenses"), src=self.source_folder)
-        copy(self, "*", dst=osp.join(self.source_folder, "include"), src=osp.join(self.package_folder, "include"))
+        copy(self, "*", dst=osp.join(self.package_folder, "include"), src=osp.join(self.source_folder, "include"))
 
     def package_id(self):
         self.info.clear()
@@ -44,3 +43,6 @@ class CinatraConan(ConanFile):
         self.cpp_info.set_property("pkg_config_name", "cinatra")
         self.cpp_info.bindirs = []
         self.cpp_info.libdirs = []
+        self.cpp_info.frameworkdirs = []
+        self.cpp_info.resdirs = []
+        self.cpp_info.includedirs = ["include"]

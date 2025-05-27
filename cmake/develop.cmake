@@ -5,7 +5,7 @@ option(BUILD_EXAMPLES "Build examples" OFF)
 option(BUILD_BENCHMARK "Build benchmark" OFF)
 
 # unit test
-option(BUILD_UNIT_TESTS "Build unit tests" ON)
+option(BUILD_UNIT_TESTS "Build unit tests" OFF)
 if(BUILD_UNIT_TESTS)
     enable_testing()
 endif()
