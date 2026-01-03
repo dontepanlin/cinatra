@@ -15,6 +15,7 @@ struct email_data {
   std::string user_name;
   std::string auth_pwd;
   std::string filepath;
+  bool is_html = false;
 };
 
 class client {
@@ -98,7 +99,8 @@ class client {
     email_content.append("\r\n");
 
     email_content.append("Subject: ").append(email.subject).append("\r\n");
-    email_content.append("Content-Type: text/plain\r\n");
+    email_content.append(email.is_html ? "Content-Type: text/html\r\n"
+                                       : "Content-Type: text/plain\r\n");
     email_content.append("\r\n");
 
     // 邮件正文
