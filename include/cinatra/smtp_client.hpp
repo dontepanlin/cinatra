@@ -99,8 +99,9 @@ class client {
     email_content.append("\r\n");
 
     email_content.append("Subject: ").append(email.subject).append("\r\n");
-    email_content.append(email.is_html ? "Content-Type: text/html\r\n"
-                                       : "Content-Type: text/plain\r\n");
+    email_content.append(email.is_html
+                             ? "Content-Type: text/html; charset=UTF-8\r\n"
+                             : "Content-Type: text/plain; charset=UTF-8\r\n");
     email_content.append("\r\n");
 
     // 邮件正文
