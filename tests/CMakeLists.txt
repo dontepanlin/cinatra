@@ -64,7 +64,7 @@ endif()
 add_executable(test_corofile
         test_corofile.cpp
         )
-
+target_link_libraries(test_corofile PRIVATE asio::asio)
 if(ENABLE_FILE_IO_URING)
   if (UNIX)
 	if (ENABLE_SSL)
@@ -100,6 +100,7 @@ endif ()
 add_executable(test_http_parse
         test_http_parse.cpp
         )
+target_link_libraries(test_http_parse asio::asio)
 if (UNIX)
 	if (ENABLE_SSL)
 		target_link_libraries(test_http_parse ${ZLIB_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto)
